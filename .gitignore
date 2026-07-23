@@ -1,0 +1,19 @@
+# Build output
+Builds/MacOSX/build/
+*.o
+*.a
+
+# macOS
+.DS_Store
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+Builds/MacOSX/*.xcodeproj/project.xcworkspace/xcuserdata/
+Builds/MacOSX/*.xcodeproj/xcuserdata/
+
+# JUCE generated intermediate (kept: .jucer is the source of truth)
+JuceLibraryCode/
+
+# Test build output
+Tests/build/
