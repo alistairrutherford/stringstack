@@ -149,6 +149,38 @@ enum ProjectStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(project).write(to: url.appendingPathComponent("project.json"))
+        engine.markSaved()
+    }
+
+    // MARK: - New project
+
+    /// New Project, guarding unsaved changes: prompts Save / Don't Save /
+    /// Cancel first. Returns without resetting if the user cancels (or
+    /// cancels the save panel for an untitled project).
+    @MainActor
+    static func newProjectWithPrompt(engine: TransportEngine) {
+        guard engine.hasUnsavedChanges else {
+            engine.newProject()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Save changes before starting a new project?"
+        alert.informativeText = "Your current changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            engine.saveInPlace()
+            // If saving went through a panel that was cancelled, the project
+            // is still dirty — abort rather than discarding the work.
+            guard !engine.hasUnsavedChanges else { return }
+            engine.newProject()
+        case .alertSecondButtonReturn:
+            engine.newProject()
+        default:
+            break
+        }
     }
 
     // MARK: - Reading

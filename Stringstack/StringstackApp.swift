@@ -13,6 +13,9 @@ struct StringstackApp: App {
         .defaultSize(width: 1120, height: 720)
         .commands {
             CommandGroup(replacing: .newItem) {
+                Button("New Project") { ProjectStore.newProjectWithPrompt(engine: engine) }
+                    .keyboardShortcut("n")
+                Divider()
                 Button("Open Project…") { ProjectStore.openWithPanel(engine: engine) }
                     .keyboardShortcut("o")
                 Button("Save Project") { engine.saveInPlace() }

@@ -22,8 +22,32 @@ struct SessionGridView: View {
                 }
                 addTrackButton
             }
+            .overlay(alignment: .topLeading) { sceneHighlight }
             .padding(.vertical, 4)
             .padding(.horizontal, 2)
+        }
+    }
+
+    /// Selected-scene outline. The grid is built as columns, so the row box
+    /// is drawn as an overlay positioned from the fixed grid metrics — it
+    /// spans the scene launcher and every track column.
+    @ViewBuilder
+    private var sceneHighlight: some View {
+        if let scene = engine.selectedScene, scene < engine.sceneCount {
+            let columnStep = GridMetrics.cellWidth + GridMetrics.spacing + 3
+            let width = GridMetrics.sceneWidth + CGFloat(engine.tracks.count) * columnStep
+            let y = GridMetrics.headerHeight + GridMetrics.spacing
+                + CGFloat(scene) * (GridMetrics.cellHeight + GridMetrics.spacing)
+
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Theme.violet.opacity(0.07))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(Theme.violet.opacity(0.7), lineWidth: 2)
+                )
+                .frame(width: width + 6, height: GridMetrics.cellHeight + 6)
+                .offset(x: -3, y: y - 3)
+                .allowsHitTesting(false)
         }
     }
 
@@ -328,6 +352,9 @@ private struct ClipCell: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .strokeBorder(dropTargeted ? Theme.cyan : .clear, lineWidth: 2)
             )
+            // Clicking anywhere in the row selects that scene; cell buttons
+            // run first, this catches the rest of the cell.
+            .simultaneousGesture(TapGesture().onEnded { engine.selectScene(scene) })
             .onDrop(of: [UTType.fileURL, UTType.plainText], isTargeted: $dropTargeted) { providers in
                 handleDrop(providers)
             }
@@ -351,6 +378,7 @@ private struct ClipCell: View {
                 engine.recordIntoSlot(track, scene: scene)
             } else if engine.mode == .stopped {
                 engine.selectTrack(track)
+                engine.selectScene(scene)
                 engine.statusMessage = "Arm \(track.name) (● in its header) to record into empty slots."
             } else {
                 engine.stopClip(on: track)
@@ -500,6 +528,7 @@ private struct FilledCell: View {
         .contentShape(Rectangle())
         .onTapGesture {
             engine.selectTrack(track)
+            engine.selectScene(scene)
             engine.selectedSlot = slotRef
         }
         .help(isQueued ? "Queued…" : "▶ launches · click selects · DEL deletes")
@@ -508,6 +537,7 @@ private struct FilledCell: View {
     /// Live-style launch button — the only part of the cell that plays.
     private var playButton: some View {
         Button {
+            engine.selectScene(scene)
             engine.selectedSlot = slotRef
             engine.launch(clip: clip, on: track)
         } label: {

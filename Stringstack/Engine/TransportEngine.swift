@@ -39,15 +39,32 @@ final class TransportEngine {
     private(set) var recordQueuedUntilBeat: Double?
     /// Last-clicked clip slot; DEL deletes it.
     var selectedSlot: SlotRef?
+    /// Last-clicked scene row, outlined in the grid.
+    var selectedScene: Int?
     /// Fixed record length in bars; nil records freely until stopped.
     var recordLengthBars: Int? = 4
 
-    var quantize: LaunchQuantize = .bar
+    var quantize: LaunchQuantize = .bar {
+        didSet { markDirty() }
+    }
     var engineError: String?
     /// Transient, non-fatal feedback ("clip too short", device unplugged…).
     var statusMessage: String?
     /// Where ⌘S saves without asking; set by the save/open panels.
     var projectURL: URL?
+    /// True once the project has edits not yet written to disk. Drives the
+    /// "save changes?" prompt on New Project.
+    private(set) var hasUnsavedChanges = false
+    /// Set while loading/resetting so bulk model changes don't mark dirty.
+    @ObservationIgnored private var suppressDirty = false
+
+    func markDirty() {
+        if !suppressDirty { hasUnsavedChanges = true }
+    }
+
+    func markSaved() {
+        hasUnsavedChanges = false
+    }
 
     /// Undo/redo for clip edits (⌘Z / ⇧⌘Z).
     @ObservationIgnored let undoManager = UndoManager()
@@ -59,15 +76,21 @@ final class TransportEngine {
             let clamped = min(max(tempo.rounded(), 20), 300)
             if clamped != tempo { tempo = clamped }
             metronome.setTempo(tempo)
+            markDirty()
         }
     }
 
     var beatsPerBar = 4 {
-        didSet { metronome.setBeatsPerBar(beatsPerBar) }
+        didSet {
+            metronome.setBeatsPerBar(beatsPerBar)
+            markDirty()
+        }
     }
 
     /// Count-in length in bars, applied when recording starts from stopped.
-    var countInBars = 1
+    var countInBars = 2 {
+        didSet { markDirty() }
+    }
 
     var metronomeEnabled = true {
         didSet { metronome.setClickAudible(metronomeEnabled) }
@@ -78,7 +101,10 @@ final class TransportEngine {
     }
 
     var masterVolume = 0.9 {
-        didSet { audioEngine.mainMixerNode.outputVolume = Float(masterVolume) }
+        didSet {
+            audioEngine.mainMixerNode.outputVolume = Float(masterVolume)
+            markDirty()
+        }
     }
 
     /// Total count-in beats of the transport run currently in progress.
@@ -131,6 +157,8 @@ final class TransportEngine {
             UserDefaults.standard.set(true, forKey: "didInstallDemoSet")
             DemoFactory.install(into: self)
         }
+        // A fresh launch (incl. the demo set) is not an unsaved user edit.
+        hasUnsavedChanges = false
 
         // Autosave every two minutes once the project has a home, while idle.
         Task { [weak self] in
@@ -188,6 +216,7 @@ final class TransportEngine {
         channels[track.id] = channel
         tracks.append(track)
         applyMix(track)
+        markDirty()
     }
 
     func deleteTrack(_ track: Track) {
@@ -212,11 +241,13 @@ final class TransportEngine {
         if selectedTrackID == track.id { selectedTrackID = tracks.first?.id }
         if selectedSlot?.trackID == track.id { selectedSlot = nil }
         applyMixAll()
+        markDirty()
     }
 
     func addScene() {
         sceneCount += 1
         for track in tracks { track.slots.append(nil) }
+        markDirty()
     }
 
     /// Selecting a track drops any clip selection on other tracks, so DEL
@@ -228,24 +259,32 @@ final class TransportEngine {
         }
     }
 
+    func selectScene(_ scene: Int) {
+        guard scene >= 0, scene < sceneCount else { return }
+        selectedScene = scene
+    }
+
     // MARK: - Mixing
 
     func setVolume(_ track: Track, _ volume: Double) {
         selectTrack(track)
         track.volume = volume
         applyMix(track)
+        markDirty()
     }
 
     func setPan(_ track: Track, _ pan: Double) {
         selectTrack(track)
         track.pan = pan
         applyMix(track)
+        markDirty()
     }
 
     func toggleMute(_ track: Track) {
         selectTrack(track)
         track.isMuted.toggle()
         applyMixAll()
+        markDirty()
     }
 
     /// Exclusive solo: soloing a track silences every other track, so only
@@ -256,6 +295,7 @@ final class TransportEngine {
         for other in tracks { other.isSoloed = false }
         track.isSoloed = willSolo
         applyMixAll()
+        markDirty()
     }
 
     func meterLevels(for track: Track) -> (left: Double, right: Double) {
@@ -296,6 +336,7 @@ final class TransportEngine {
                                             componentDescription: description, node: unit)
                 track.effects.append(effect)
                 rebuildChain(for: track)
+                markDirty()
                 statusMessage = nil
             } catch {
                 statusMessage = "Couldn't load \(name): \(error.localizedDescription)"
@@ -308,6 +349,7 @@ final class TransportEngine {
         track.effects.removeAll { $0.id == effect.id }
         rebuildChain(for: track)
         audioEngine.detach(effect.node)
+        markDirty()
     }
 
     /// Moves an effect one step left (-1) or right (+1) in the chain.
@@ -317,6 +359,7 @@ final class TransportEngine {
         guard target >= 0, target < track.effects.count else { return }
         track.effects.swapAt(index, target)
         rebuildChain(for: track)
+        markDirty()
     }
 
     /// Reconnects inputMixer → effects… → fader mixer in chain order.
@@ -548,6 +591,7 @@ final class TransportEngine {
     }
 
     func launchScene(_ scene: Int) {
+        selectScene(scene)
         if recordingSlot != nil { return }
         let clips = tracks.map { $0.slots[scene] }
         guard clips.contains(where: { $0 != nil }) || mode != .stopped else { return }
@@ -831,6 +875,7 @@ final class TransportEngine {
         let clip = Clip(name: name, colorIndex: track.colorIndex, buffer: buffer,
                         loopBars: bars, fileURL: url)
         track.slots[slot.scene] = clip
+        markDirty()
         statusMessage = nil
         return clip
     }
@@ -857,9 +902,11 @@ final class TransportEngine {
             playback[track.id] = TrackPlayback()
         }
         track.slots[scene] = nil
+        markDirty()
         registerUndo("Delete Clip") { engine in
             guard scene < track.slots.count, track.slots[scene] == nil else { return }
             track.slots[scene] = clip
+            engine.markDirty()
             engine.registerUndo("Delete Clip") { $0.deleteClip(on: track, scene: scene) }
         }
     }
@@ -872,6 +919,7 @@ final class TransportEngine {
         let moving = sourceTrack.slots[source.scene]
         sourceTrack.slots[source.scene] = destinationTrack.slots[destination.scene]
         destinationTrack.slots[destination.scene] = moving
+        markDirty()
         registerUndo("Move Clip") { $0.moveClip(from: destination, to: source) }
     }
 
@@ -888,6 +936,7 @@ final class TransportEngine {
         guard let clip = makeClip(fromFile: url, colorIndex: track.colorIndex) else { return }
         if track.slots[scene] != nil { deleteClip(on: track, scene: scene) }
         track.slots[scene] = clip
+        markDirty()
     }
 
     private func makeClip(fromFile url: URL, colorIndex: Int) -> Clip? {
@@ -936,6 +985,8 @@ final class TransportEngine {
                         quantize: LaunchQuantize, sceneCount: Int,
                         masterVolume: Double, newTracks: [Track]) {
         stop()
+        suppressDirty = true
+        defer { suppressDirty = false; hasUnsavedChanges = false }
         for track in tracks { deleteTrack(track) }
         self.tempo = tempo
         self.beatsPerBar = beatsPerBar
@@ -959,7 +1010,19 @@ final class TransportEngine {
         }
         selectedTrackID = tracks.first?.id
         selectedSlot = nil
+        selectedScene = nil
         applyMixAll()
+    }
+
+    /// Resets to a fresh, empty 4-track / 4-scene project at defaults.
+    func newProject() {
+        let fresh = (0..<4).map {
+            Track(name: "Track \($0 + 1)", colorIndex: $0 % 6, sceneCount: 4)
+        }
+        replaceSession(tempo: 120, beatsPerBar: 4, countInBars: 2, quantize: .bar,
+                       sceneCount: 4, masterVolume: 0.9, newTracks: fresh)
+        projectURL = nil
+        statusMessage = "New project."
     }
 
     // MARK: - Beat/time mapping
