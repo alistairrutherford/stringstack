@@ -146,16 +146,19 @@ private struct TrackColumn: View {
             }
         }
         // Selection reads as a box around the whole column — header and
-        // every clip — so it can't be mistaken for keyboard focus.
+        // every clip — so it can't be mistaken for keyboard focus. Purely
+        // decorative, so it must not intercept hover/clicks on the controls.
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(isSelected ? color.opacity(0.07) : .clear)
                 .padding(-3)
+                .allowsHitTesting(false)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .strokeBorder(isSelected ? color.opacity(0.7) : .clear, lineWidth: 2)
                 .padding(-3)
+                .allowsHitTesting(false)
         )
     }
 }
@@ -173,12 +176,14 @@ private struct TrackHeader: View {
                 .foregroundStyle(.white.opacity(0.9))
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .help("\(track.name) — click to select this track. Right-click to delete it.")
 
             HStack(spacing: 6) {
                 headerButton("record.circle", active: track.isArmed, color: Theme.coral) {
                     engine.toggleArm(track)
                 }
-                .help("Arm for recording")
+                .help("Arm this track for recording (only one track can be armed at a time)")
 
                 headerButton(track.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
                              active: track.isMuted, color: Theme.amber) {
@@ -189,9 +194,11 @@ private struct TrackHeader: View {
                 headerButton("s.square.fill", active: track.isSoloed, color: Theme.cyan) {
                     engine.toggleSolo(track)
                 }
-                .help("Solo")
+                .help("Solo — silence every other track so only this one plays")
 
                 Spacer(minLength: 0)
+
+                overdubToggle
             }
 
             HStack(spacing: 10) {
@@ -222,7 +229,18 @@ private struct TrackHeader: View {
         .contextMenu {
             Button("Delete Track", role: .destructive) { engine.deleteTrack(track) }
         }
-        .help("Click to select (FX chain below follows selection)")
+    }
+
+    /// Record-mode toggle for recording into an occupied cell, styled like
+    /// the solo button: shows 'o' for Overdub (layer on top) or 'r' for
+    /// Replace (clear & re-record), coloured by mode.
+    private var overdubToggle: some View {
+        headerButton(track.isOverdub ? "o.square.fill" : "r.square.fill",
+                     active: true,
+                     color: track.isOverdub ? Theme.mint : Theme.amber) {
+            engine.toggleOverdub(track)
+        }
+        .help("Record mode when the cell already has a clip (click to toggle).\nO = Overdub: the existing clip plays and your new take is layered on top, same length.\nR = Replace: the existing clip is cleared and re-recorded from scratch.")
     }
 
     private func headerButton(_ symbol: String, active: Bool, color: Color,
@@ -362,7 +380,9 @@ private struct ClipCell: View {
 
     @ViewBuilder
     private var content: some View {
-        if let clip {
+        // While recording here, always show the recording indicator — even
+        // over an occupied slot being replaced.
+        if let clip, !isRecordingHere {
             FilledCell(clip: clip, track: track, scene: scene,
                        isRecordingHere: isRecordingHere)
         } else {

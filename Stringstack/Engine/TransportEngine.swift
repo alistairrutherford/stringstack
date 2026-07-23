@@ -120,6 +120,12 @@ final class TransportEngine {
     @ObservationIgnored private var recordStartBeat = 0.0
     @ObservationIgnored private var inputConfigured = false
     @ObservationIgnored private var recordAutoStopTask: Task<Void, Never>?
+    /// When recording an overdub, the existing clip being layered onto; its
+    /// length also fixes the take length via `recordBarsOverride`.
+    @ObservationIgnored private var overdubSource: Clip?
+    @ObservationIgnored private var recordBarsOverride: Int?
+    /// A Replace-mode take that must clear its slot once recording begins.
+    @ObservationIgnored private var replaceClearPending = false
     /// Every clip buffer is converted to this on creation, so any clip can
     /// play on any (permanently connected) track player.
     @ObservationIgnored private(set) var standardFormat: AVAudioFormat
@@ -295,6 +301,13 @@ final class TransportEngine {
         for other in tracks { other.isSoloed = false }
         track.isSoloed = willSolo
         applyMixAll()
+        markDirty()
+    }
+
+    /// Record-into-occupied-clip mode: overdub (layer) when on, replace when off.
+    func toggleOverdub(_ track: Track) {
+        selectTrack(track)
+        track.isOverdub.toggle()
         markDirty()
     }
 
@@ -546,6 +559,9 @@ final class TransportEngine {
             recordingSlot = nil
             recordQueuedUntilBeat = nil
         }
+        overdubSource = nil
+        recordBarsOverride = nil
+        replaceClearPending = false
         for channel in channels.values {
             channel.pendingTask?.cancel()
             channel.pendingTask = nil
@@ -709,32 +725,76 @@ final class TransportEngine {
 
     // MARK: - Recording
 
-    /// R key: record into the armed track's first empty slot.
+    /// R key / record button: record into the currently selected cell; if
+    /// nothing is selected, fall back to the armed track's first empty slot.
     func record() {
         guard recordingSlot == nil else { return }
+        if let slot = selectedSlot,
+           let track = tracks.first(where: { $0.id == slot.trackID }), track.isArmed {
+            recordIntoSlot(track, scene: slot.scene)
+            return
+        }
         guard let track = armedTrack else {
-            statusMessage = "Arm a track to record (● in a track header)."
+            statusMessage = "Arm a track and select a cell to record into (● in a track header)."
             return
         }
         guard let scene = track.slots.firstIndex(where: { $0 == nil }) else {
-            statusMessage = "No empty slot on the armed track."
+            statusMessage = "No empty slot on the armed track — select a clip to overwrite or overdub."
             return
         }
         recordIntoSlot(track, scene: scene)
     }
 
+    /// Records into a cell. Empty → new clip. Occupied → overdub (layer) or
+    /// replace, per the track's `isOverdub` setting.
     func recordIntoSlot(_ track: Track, scene: Int) {
         selectTrack(track)
+        selectedSlot = SlotRef(trackID: track.id, scene: scene)
         guard track.isArmed else {
             statusMessage = "Arm the track first (● in its header)."
             return
         }
-        guard recordingSlot == nil, track.slots[scene] == nil else { return }
+        guard recordingSlot == nil else { return }
+
+        let existing = track.slots[scene]
+        if let existing, track.isOverdub {
+            overdubSource = existing
+            recordBarsOverride = existing.loopBars
+        } else {
+            overdubSource = nil
+            recordBarsOverride = nil
+            // Replacing an occupied slot: silence the outgoing clip now, and
+            // clear it from the slot when recording actually begins.
+            if existing != nil {
+                stopTrackPlayback(track)
+                replaceClearPending = true
+            }
+        }
+
         if mode == .stopped {
             Task { await startRecordingFromStopped(track, scene: scene) }
         } else {
             startRecordingWhileRolling(track, scene: scene)
         }
+    }
+
+    private func stopTrackPlayback(_ track: Track) {
+        guard let channel = channels[track.id] else { return }
+        channel.pendingTask?.cancel()
+        channel.pendingTask = nil
+        channel.stopAllPlayers()
+        playback[track.id] = TrackPlayback()
+    }
+
+    /// Loops `clip` starting exactly at `host` for overdub monitoring, so the
+    /// performer hears the existing take while recording the new layer.
+    private func startMonitorPlayback(_ clip: Clip, on track: Track, atHost host: UInt64) {
+        guard let channel = channels[track.id] else { return }
+        let index = channel.activeIndex
+        let player = channel.players[index]
+        player.stop()
+        player.scheduleBuffer(clip.buffer, at: nil, options: [.loops])
+        player.play(at: AVAudioTime(hostTime: host))
     }
 
     /// Clicking the recording cell: finish the take and relaunch it, with the
@@ -769,7 +829,9 @@ final class TransportEngine {
     private func scheduleRecordAutoStop() {
         recordAutoStopTask?.cancel()
         recordAutoStopTask = nil
-        guard let bars = recordLengthBars else { return }
+        // Overdub always runs for the source clip's length; otherwise the
+        // REC BARS setting (nil = free, no auto-stop).
+        guard let bars = recordBarsOverride ?? recordLengthBars else { return }
         let endBeat = recordStartBeat + Double(bars * beatsPerBar)
         recordAutoStopTask = Task { [weak self] in
             guard let self else { return }
@@ -805,10 +867,14 @@ final class TransportEngine {
         let countInSeconds = Double(activeCountInBeats) * 60.0 / recordTempo
         beat0Host = anchor + HostClock.ticks(forSeconds: countInSeconds)
         metronome.start(countInBeats: activeCountInBeats, atHostTime: anchor)
+        if let source = overdubSource {
+            startMonitorPlayback(source, on: track, atHost: beat0Host)
+        }
         recordingSlot = SlotRef(trackID: track.id, scene: scene)
         mode = .recording
         metronome.setClickSuppressed(true)
         scheduleRecordAutoStop()
+        scheduleReplaceClear(atBeat: recordStartBeat)
     }
 
     private func startRecordingWhileRolling(_ track: Track, scene: Int) {
@@ -824,16 +890,35 @@ final class TransportEngine {
         let boundary = Double(beatsPerBar) * ((currentBeats + 0.05 * tempo / 60) / Double(beatsPerBar)).rounded(.up)
         recordStartBeat = boundary
         beat0Host = hostTime(forBeat: boundary)
+        if let source = overdubSource {
+            startMonitorPlayback(source, on: track, atHost: beat0Host)
+        }
         recordingSlot = SlotRef(trackID: track.id, scene: scene)
         recordQueuedUntilBeat = boundary
         mode = .recording
         metronome.setClickSuppressed(true)
         scheduleRecordAutoStop()
+        scheduleReplaceClear(atBeat: boundary)
 
         Task { [weak self] in
             await self?.sleep(untilBeat: boundary)
             guard let self else { return }
             if self.recordQueuedUntilBeat == boundary { self.recordQueuedUntilBeat = nil }
+        }
+    }
+
+    /// Clears a Replace-mode target clip from its slot the moment recording
+    /// actually starts (after count-in / at punch-in), so it isn't left
+    /// sitting there during the take. Cancelling during count-in keeps it.
+    private func scheduleReplaceClear(atBeat beat: Double) {
+        guard replaceClearPending, let slot = recordingSlot else { return }
+        replaceClearPending = false
+        Task { [weak self] in
+            await self?.sleep(untilBeat: beat)
+            guard let self, self.recordingSlot == slot,
+                  let track = self.tracks.first(where: { $0.id == slot.trackID }),
+                  slot.scene < track.slots.count else { return }
+            track.slots[slot.scene] = nil
         }
     }
 
@@ -844,12 +929,17 @@ final class TransportEngine {
         guard let slot = recordingSlot else { return nil }
         recorder.endCapture()
 
-        // Anything captured past the count-in becomes a clip: fixed-length
-        // mode always yields the chosen bar count (silence-padded if the
+        let source = overdubSource
+        overdubSource = nil
+        let barsOverride = recordBarsOverride
+        recordBarsOverride = nil
+
+        // Anything captured past the count-in becomes a clip. Overdub and
+        // fixed-length both yield an exact bar count (silence-padded if the
         // take was cut short); free mode rounds up to whole bars.
         let beatsRecorded = currentBeats - recordStartBeat
         let bars: Int
-        if let fixed = recordLengthBars {
+        if let fixed = barsOverride ?? recordLengthBars {
             bars = fixed
         } else {
             bars = max(1, Int(((beatsRecorded + 0.05) / Double(beatsPerBar)).rounded(.up)))
@@ -865,18 +955,35 @@ final class TransportEngine {
         let framesPerBeat = 60.0 / recordTempo * format.sampleRate
         let frameCount = AVAudioFrameCount((Double(bars * beatsPerBar) * framesPerBeat).rounded())
         guard let captured = recorder.makeLoopBuffer(beat0Host: beat0Host, frameCount: frameCount),
-              let buffer = AudioUtil.convert(captured, to: standardFormat) else {
+              let takeBuffer = AudioUtil.convert(captured, to: standardFormat) else {
             statusMessage = "Recording failed — no audio was captured."
             return nil
         }
 
-        let name = "\(track.name) \(slot.scene + 1)"
+        // Overdub: sum the new take onto the existing clip (same length).
+        let buffer: AVAudioPCMBuffer
+        let name: String
+        let colorIndex: Int
+        let loopBars: Int
+        if let source, let mixed = AudioUtil.mix(base: source.buffer, overlay: takeBuffer) {
+            buffer = mixed
+            name = source.name
+            colorIndex = source.colorIndex
+            loopBars = source.loopBars
+            statusMessage = "Overdubbed \(source.name)."
+        } else {
+            buffer = takeBuffer
+            name = "\(track.name) \(slot.scene + 1)"
+            colorIndex = track.colorIndex
+            loopBars = bars
+            statusMessage = nil
+        }
+
         let url = recorder.writeFile(buffer: buffer, name: name)
-        let clip = Clip(name: name, colorIndex: track.colorIndex, buffer: buffer,
-                        loopBars: bars, fileURL: url)
+        let clip = Clip(name: name, colorIndex: colorIndex, buffer: buffer,
+                        loopBars: loopBars, fileURL: url)
         track.slots[slot.scene] = clip
         markDirty()
-        statusMessage = nil
         return clip
     }
 

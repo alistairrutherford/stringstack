@@ -47,6 +47,7 @@ enum ProjectStore {
         var pan: Double
         var isMuted: Bool
         var isSoloed: Bool
+        var isOverdub: Bool?
         var slots: [UUID?]
         var placements: [PlacementData]?
         var effects: [EffectData]?
@@ -122,6 +123,7 @@ enum ProjectStore {
             TrackData(name: track.name, colorIndex: track.colorIndex,
                       volume: track.volume, pan: track.pan,
                       isMuted: track.isMuted, isSoloed: track.isSoloed,
+                      isOverdub: track.isOverdub,
                       slots: track.slots.map { $0?.id },
                       placements: nil,
                       effects: track.effects.map { effect in
@@ -215,6 +217,7 @@ enum ProjectStore {
             track.pan = trackData.pan
             track.isMuted = trackData.isMuted
             track.isSoloed = trackData.isSoloed
+            track.isOverdub = trackData.isOverdub ?? false
             var slots: [Clip?] = trackData.slots.map { $0.flatMap { clipsByID[$0] } }
             while slots.count < project.sceneCount { slots.append(nil) }
             track.slots = Array(slots.prefix(project.sceneCount))

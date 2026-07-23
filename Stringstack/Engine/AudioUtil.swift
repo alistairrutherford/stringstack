@@ -24,6 +24,34 @@ enum AudioUtil {
         return conversionError == nil ? output : nil
     }
 
+    /// Sums `overlay` onto a copy of `base` (for overdub), clamped to
+    /// [-1, 1]. Result length matches `base`; `overlay` is added where the
+    /// two overlap. Both are assumed to share `base`'s format.
+    static func mix(base: AVAudioPCMBuffer, overlay: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let baseData = base.floatChannelData,
+              let out = AVAudioPCMBuffer(pcmFormat: base.format, frameCapacity: base.frameLength),
+              let outData = out.floatChannelData else { return nil }
+        out.frameLength = base.frameLength
+        let channels = Int(base.format.channelCount)
+        let baseFrames = Int(base.frameLength)
+        for channel in 0..<channels {
+            outData[channel].update(from: baseData[channel], count: baseFrames)
+        }
+        if let overlayData = overlay.floatChannelData {
+            let overlayFrames = min(baseFrames, Int(overlay.frameLength))
+            let overlayChannels = Int(overlay.format.channelCount)
+            for channel in 0..<channels {
+                let source = overlayData[min(channel, overlayChannels - 1)]
+                for frame in 0..<overlayFrames {
+                    var sample = outData[channel][frame] + source[frame]
+                    sample = max(-1, min(1, sample))
+                    outData[channel][frame] = sample
+                }
+            }
+        }
+        return out
+    }
+
     /// Copies `frames` frames starting at `start` into a new buffer.
     static func slice(_ buffer: AVAudioPCMBuffer, from start: Int, frames: Int) -> AVAudioPCMBuffer? {
         guard frames > 0, start >= 0, start + frames <= Int(buffer.frameLength),

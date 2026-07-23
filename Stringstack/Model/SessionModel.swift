@@ -12,6 +12,9 @@ final class Track: Identifiable {
     var isArmed = false
     var isMuted = false
     var isSoloed = false
+    /// When recording into a cell that already holds a clip: overdub (layer
+    /// the new take onto the existing audio) if true, otherwise replace it.
+    var isOverdub = false
     var volume = 0.8
     var pan = 0.0
     var slots: [Clip?]
