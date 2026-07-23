@@ -154,6 +154,7 @@ final class TransportEngine {
 
         for index in 0..<4 { addTrack(named: "Track \(index + 1)") }
         selectedTrackID = tracks.first?.id
+        if sceneCount > 0 { selectedScene = 0 }
 
         devices.onDeviceListChanged = { [weak self] in
             self?.handleDeviceListChange()
@@ -1117,7 +1118,7 @@ final class TransportEngine {
         }
         selectedTrackID = tracks.first?.id
         selectedSlot = nil
-        selectedScene = nil
+        selectedScene = sceneCount > 0 ? 0 : nil
         applyMixAll()
     }
 
