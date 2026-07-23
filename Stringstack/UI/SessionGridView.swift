@@ -370,9 +370,13 @@ private struct ClipCell: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .strokeBorder(dropTargeted ? Theme.cyan : .clear, lineWidth: 2)
             )
-            // Clicking anywhere in the row selects that scene; cell buttons
-            // run first, this catches the rest of the cell.
-            .simultaneousGesture(TapGesture().onEnded { engine.selectScene(scene) })
+            // Clicking anywhere in a cell selects that cell (track x, scene y)
+            // so record and DEL always target it. Cell buttons run alongside.
+            .simultaneousGesture(TapGesture().onEnded {
+                engine.selectTrack(track)
+                engine.selectScene(scene)
+                engine.selectedSlot = slotRef
+            })
             .onDrop(of: [UTType.fileURL, UTType.plainText], isTargeted: $dropTargeted) { providers in
                 handleDrop(providers)
             }
@@ -396,13 +400,10 @@ private struct ClipCell: View {
                 engine.finishRecordingAndPlay()
             } else if track.isArmed {
                 engine.recordIntoSlot(track, scene: scene)
-            } else if engine.mode == .stopped {
-                engine.selectTrack(track)
-                engine.selectScene(scene)
-                engine.statusMessage = "Arm \(track.name) (● in its header) to record into empty slots."
-            } else {
+            } else if engine.mode != .stopped {
                 engine.stopClip(on: track)
             }
+            // Otherwise just select the cell (handled by the cell gesture).
         } label: {
             ZStack {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)

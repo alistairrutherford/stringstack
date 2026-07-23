@@ -726,24 +726,32 @@ final class TransportEngine {
 
     // MARK: - Recording
 
-    /// R key / record button: record into the currently selected cell; if
-    /// nothing is selected, fall back to the armed track's first empty slot.
+    /// R key / record button: always record into the currently selected cell
+    /// (track x, scene y). Only when nothing is selected does it fall back to
+    /// the armed track's first empty slot. The target cell's track is armed
+    /// automatically, since recording uses the single input.
     func record() {
         guard recordingSlot == nil else { return }
+
+        let target: (track: Track, scene: Int)?
         if let slot = selectedSlot,
-           let track = tracks.first(where: { $0.id == slot.trackID }), track.isArmed {
-            recordIntoSlot(track, scene: slot.scene)
+           let track = tracks.first(where: { $0.id == slot.trackID }),
+           slot.scene < track.slots.count {
+            target = (track, slot.scene)
+        } else if let track = armedTrack,
+                  let scene = track.slots.firstIndex(where: { $0 == nil }) {
+            target = (track, scene)
+        } else {
+            target = nil
+        }
+
+        guard let target else {
+            statusMessage = "Select a cell to record into."
             return
         }
-        guard let track = armedTrack else {
-            statusMessage = "Arm a track and select a cell to record into (● in a track header)."
-            return
-        }
-        guard let scene = track.slots.firstIndex(where: { $0 == nil }) else {
-            statusMessage = "No empty slot on the armed track — select a clip to overwrite or overdub."
-            return
-        }
-        recordIntoSlot(track, scene: scene)
+        // Recording uses one input, so make the selected cell's track armed.
+        if !target.track.isArmed { armOnly(target.track) }
+        recordIntoSlot(target.track, scene: target.scene)
     }
 
     /// Records into a cell. Empty → new clip. Occupied → overdub (layer) or
