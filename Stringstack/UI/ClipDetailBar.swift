@@ -59,15 +59,18 @@ struct ClipDetailBar: View {
 
     private func waveformView(clip: Clip, track: Track, color: Color) -> some View {
         TimelineView(.animation) { _ in
-            GeometryReader { proxy in
-                let state = engine.playback[track.id]
-                let isPlaying = state?.playingClipID == clip.id
-                let loopBeats = Double(clip.loopBars * engine.beatsPerBar)
-                let elapsed = engine.currentBeats - (state?.playingStartBeat ?? 0)
-                let fraction = (isPlaying && loopBeats > 0)
-                    ? max(0, elapsed.truncatingRemainder(dividingBy: loopBeats)) / loopBeats
-                    : 0
+            // Compute the play position here (per tick), OUTSIDE the
+            // GeometryReader — a GeometryReader won't re-run its content on a
+            // TimelineView tick unless a captured value actually changes.
+            let state = engine.playback[track.id]
+            let isPlaying = state?.playingClipID == clip.id
+            let loopBeats = Double(clip.loopBars * engine.beatsPerBar)
+            let elapsed = engine.currentBeats - (state?.playingStartBeat ?? 0)
+            let fraction = (isPlaying && loopBeats > 0)
+                ? max(0, elapsed.truncatingRemainder(dividingBy: loopBeats)) / loopBeats
+                : 0
 
+            GeometryReader { proxy in
                 ZStack(alignment: .topLeading) {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(Color.black.opacity(0.3))
@@ -91,21 +94,22 @@ struct ClipDetailBar: View {
                         .padding(.horizontal, 4)
                         .padding(.vertical, 6)
 
-                    // Playback line with a top marker, sweeping the loop.
-                    ZStack(alignment: .top) {
+                    // Ableton-style follow line sweeping the loop while it
+                    // plays, with a triangle marker at the top.
+                    if isPlaying {
+                        let x = proxy.size.width * fraction
                         Rectangle()
-                            .fill(Color.white)
+                            .fill(Color.white.opacity(0.95))
                             .frame(width: 2)
-                            .frame(maxHeight: .infinity)
+                            .shadow(color: .black.opacity(0.5), radius: 1)
+                            .position(x: x, y: proxy.size.height / 2)
+                            .allowsHitTesting(false)
                         Image(systemName: "arrowtriangle.down.fill")
                             .font(.system(size: 7, weight: .bold))
-                            .foregroundStyle(Color.white)
-                            .offset(y: -1)
+                            .foregroundStyle(.white)
+                            .position(x: x, y: 4)
+                            .allowsHitTesting(false)
                     }
-                    .frame(width: 10)
-                    .shadow(color: color.opacity(0.9), radius: 3)
-                    .offset(x: proxy.size.width * fraction - 5)
-                    .opacity(isPlaying ? 1 : 0)
                 }
             }
         }

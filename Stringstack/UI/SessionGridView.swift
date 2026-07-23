@@ -518,6 +518,21 @@ private struct FilledCell: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 7)
 
+            // Ableton-style follow line sweeping the clip while it plays.
+            if isPlaying {
+                GeometryReader { proxy in
+                    Rectangle()
+                        .fill(Color.white.opacity(0.9))
+                        .frame(width: 1.5)
+                        .shadow(color: .black.opacity(0.4), radius: 1)
+                        .position(x: proxy.size.width * playFraction(beats: beats),
+                                  y: proxy.size.height / 2)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 7)
+                .allowsHitTesting(false)
+            }
+
             HStack(spacing: 6) {
                 playButton
                 VStack(alignment: .leading, spacing: 1) {
@@ -571,10 +586,16 @@ private struct FilledCell: View {
         .help("Launch clip")
     }
 
-    private func progressRing(beats: Double) -> some View {
+    /// Position through the current loop (0...1) for the follow line and ring.
+    private func playFraction(beats: Double) -> Double {
         let loopBeats = Double(clip.loopBars * engine.beatsPerBar)
+        guard loopBeats > 0 else { return 0 }
         let elapsed = beats - (state?.playingStartBeat ?? 0)
-        let fraction = loopBeats > 0 ? (elapsed.truncatingRemainder(dividingBy: loopBeats)) / loopBeats : 0
+        return max(0, elapsed.truncatingRemainder(dividingBy: loopBeats)) / loopBeats
+    }
+
+    private func progressRing(beats: Double) -> some View {
+        let fraction = playFraction(beats: beats)
         return ZStack {
             Circle()
                 .stroke(Color.black.opacity(0.25), lineWidth: 3)
