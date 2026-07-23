@@ -170,17 +170,18 @@ private struct TrackHeader: View {
                 Spacer(minLength: 0)
             }
 
-            sliderRow("VOL", value: Binding(
-                get: { track.volume },
-                set: { engine.setVolume(track, $0) }
-            ), range: 0...1)
-            .help("Track volume")
+            HStack(spacing: 10) {
+                sliderRow("VOL", value: Binding(
+                    get: { track.volume },
+                    set: { engine.setVolume(track, $0) }
+                ), range: 0...1)
+                .help("Track volume")
 
-            sliderRow("PAN", value: Binding(
-                get: { track.pan },
-                set: { engine.setPan(track, $0) }
-            ), range: -1...1)
-            .help("Pan")
+                PanKnob(color: color, pan: Binding(
+                    get: { track.pan },
+                    set: { engine.setPan(track, $0) }
+                ))
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -228,6 +229,82 @@ private struct TrackHeader: View {
                 .tint(color)
                 .focusable(false)
         }
+    }
+}
+
+/// Rotary pan control: centre (0) points straight up, sweeping ±135° to hard
+/// left/right. Drag vertically to turn; double-click re-centres.
+private struct PanKnob: View {
+    let color: Color
+    @Binding var pan: Double
+    @State private var dragStart: Double?
+
+    private let sweep = 135.0
+
+    private var angle: Double { pan * sweep }
+
+    private var readout: String {
+        if abs(pan) < 0.02 { return "C" }
+        let side = pan < 0 ? "L" : "R"
+        return "\(side)\(Int((abs(pan) * 100).rounded()))"
+    }
+
+    var body: some View {
+        VStack(spacing: 2) {
+            ZStack {
+                Circle()
+                    .fill(Theme.surface)
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+
+                // Deflection arc from centre (12 o'clock) to the pointer.
+                PanArc(pan: pan, sweep: sweep)
+                    .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .padding(3)
+
+                // Pointer notch.
+                Capsule()
+                    .fill(color)
+                    .frame(width: 2, height: 9)
+                    .offset(y: -6)
+                    .rotationEffect(.degrees(angle))
+            }
+            .frame(width: 30, height: 30)
+
+            Text(readout)
+                .font(.system(size: 7, weight: .heavy).monospacedDigit())
+                .foregroundStyle(Theme.dimmed)
+        }
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { value in
+                    if dragStart == nil { dragStart = pan }
+                    let next = (dragStart ?? 0) - Double(value.translation.height) * 0.012
+                    pan = min(max(next, -1), 1)
+                }
+                .onEnded { _ in dragStart = nil }
+        )
+        .onTapGesture(count: 2) { pan = 0 }
+        .help("Pan — drag to turn · double-click to centre")
+    }
+}
+
+/// Arc traced from 12 o'clock to the current pan position.
+private struct PanArc: Shape {
+    let pan: Double
+    let sweep: Double
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let centre = CGPoint(x: rect.midX, y: rect.midY)
+        let radius = min(rect.width, rect.height) / 2
+        // SwiftUI angles measure from 3 o'clock; 12 o'clock is -90°.
+        let top = Angle.degrees(-90)
+        let target = Angle.degrees(-90 + pan * sweep)
+        path.addArc(center: centre, radius: radius,
+                    startAngle: min(top, target), endAngle: max(top, target),
+                    clockwise: false)
+        return path
     }
 }
 
