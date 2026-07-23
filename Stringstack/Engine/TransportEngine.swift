@@ -248,9 +248,13 @@ final class TransportEngine {
         applyMixAll()
     }
 
+    /// Exclusive solo: soloing a track silences every other track, so only
+    /// this one plays. Clicking an already-soloed track clears solo.
     func toggleSolo(_ track: Track) {
         selectTrack(track)
-        track.isSoloed.toggle()
+        let willSolo = !track.isSoloed
+        for other in tracks { other.isSoloed = false }
+        track.isSoloed = willSolo
         applyMixAll()
     }
 
