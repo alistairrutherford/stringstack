@@ -4,6 +4,8 @@ A simple, colourful loop-based audio DAW for macOS, inspired by the **Session vi
 
 Stringstack is written in **SwiftUI** on top of **AVAudioEngine**, and hosts **Audio Unit (AU) effect plugins**.
 
+![Stringstack](screenshot.jpg)
+
 ---
 
 ## What it does
@@ -46,24 +48,26 @@ The first time you record, macOS will ask for **microphone permission** — appr
 From top to bottom:
 
 1. **Transport bar** — play/stop/record, position readout with beat dots, tempo, time signature, count-in, record length, quantise, and metronome controls.
-2. **Clip grid** — the scene launch column plus one column per track.
-3. **Clip inspector** — the selected clip's waveform with a bar/beat grid and a moving playback line.
+2. **Clip grid** — the scene launch/stop column plus one column per track.
+3. **Clip inspector** — the selected clip's waveform with a bar/beat grid and a follow line that tracks playback.
 4. **FX chain bar** — the selected track's Audio Unit effect chain.
 5. **Input bar** — the recording input device picker and live input level meter.
 6. **Status bar** — messages, errors, and a shortcut hint.
 
 ### Selection cues
 
+Clicking anywhere on a cell selects it — track (x) and scene (y) — and drives what recording and Delete act on. On launch, track 1 and scene 1 are selected.
+
 - **Coloured box around a column** — the selected track (its FX chain is shown, and ⌥ shortcuts target it).
-- **Violet box around a row** — the selected scene.
-- **White outline on a clip** — the selected clip (the target for the Delete key).
+- **Violet box around a row** — the selected scene (its launch triangle pulses with the beat while playing).
+- **White outline on a cell** — the selected clip/cell (the target for the record button and the Delete key).
 
 ---
 
 ## Transport & timing
 
-- **Play / Stop** — `Space`
-- **Record** — `R`
+- **Play / Stop** — `Space`. Play launches the currently **selected scene** (all clips in that row); Play again stops.
+- **Record** — `R`. Only enabled when the selected track is armed (the record button greys out otherwise).
 - **Tempo** — type a BPM into the field, use the −/+ steppers, or drag the number up/down (20–300 BPM).
 - **Time signature** — 2/4 through 7/4.
 - **Count-in** — off, 1, 2 (default), or 4 bars of clicks before recording starts.
@@ -83,10 +87,10 @@ Each track column has a header with:
 - **Arm** (●) — arm the track for recording. Only one track is armed at a time.
 - **Mute** — silence the track.
 - **Solo** — exclusive: silences every other track so only this one plays.
-- **o / r** — record mode when recording into a cell that **already has a clip**:
+- **o / r** — record mode when recording into a cell that **already has a clip** (styled like the solo button, showing the active letter):
   - **o** (Overdub) — the existing clip plays and your new take is layered on top, keeping the same length.
   - **r** (Replace) — the existing clip is cleared and re-recorded from scratch.
-- **Volume** slider and **Pan** knob (double-click the knob to re-centre).
+- **Volume** slider and a rotary **Pan** knob (drag to turn, double-click to re-centre).
 
 Add a track with the **+ TRACK** button; add a scene row with the **+** under the scene column.
 
@@ -94,12 +98,12 @@ Add a track with the **+ TRACK** button; add a scene row with the **+** under th
 
 ## Recording a loop
 
-1. **Arm** a track (●). The first time, this configures the mic input and may prompt for permission.
-2. **Select** the cell you want to record into (click it).
-3. Press **`R`** (or the record button). Recording targets the selected cell; if nothing suitable is selected it falls back to the armed track's first empty slot.
+1. **Arm** a track (●). Only one track is armed at a time. The first arm configures the mic input and may prompt for permission.
+2. **Select** the cell you want to record into (click it). The record button lights up once the selected track is armed.
+3. Press the **record button** (or **`R`**). Recording only ever starts from the record button — clicking a cell just selects it, it never starts recording. It records into the selected cell (or the armed track's first empty slot if no cell on that track is selected).
 4. After the **count-in**, play your part. With a fixed **REC BARS** length it stops automatically and starts looping; otherwise press **Stop** (or click the recording cell) to finish.
 
-Takes are trimmed to whole bars and aligned to the beat, so loops line up even if your timing isn't exact. If you stop early, a fixed-length clip is still created at the chosen length (silence-padded).
+During the count-in the position readout shows a plain bar countdown (e.g. `2` then `1`). Takes are trimmed to whole bars and aligned to the beat, so loops line up even if your timing isn't exact. If you stop early, a fixed-length clip is still created at the chosen length (silence-padded).
 
 Recording into an occupied cell uses that track's **o / r** mode (overdub or replace). *Tip: for a clean overdub, monitor on headphones so the existing loop doesn't bleed back into the mic.*
 
@@ -107,10 +111,10 @@ Recording into an occupied cell uses that track's **o / r** mode (overdub or rep
 
 ## Playing clips
 
-- **Launch a clip** — click its ▶ button. It starts at the next quantise boundary and loops.
+- **Launch a clip** — click its ▶ button. It starts at the next quantise boundary and loops. A vertical **follow line** sweeps its waveform while it plays (both in the cell and in the clip inspector).
 - **Select a clip** — click anywhere else on the cell (white outline). `Delete` removes the selected clip.
-- **Stop a track** — click an empty cell on that track while it's playing.
-- **Launch a scene** — click the ▶ in the scene column to fire that whole row; the stop button below the scenes stops everything.
+- **Launch a scene** — click the ▶ in the scene column to fire that whole row. The main Play button also launches the currently selected scene, and the selected scene's ▶ pulses with the beat.
+- **Stop** — each scene row has a clear (outlined) **■ square** to the right of its ▶ that flashes when clicked and stops everything, exactly like the main Stop button. You can also stop a single track's clip by clicking an empty cell on that track while it plays.
 - **Move a clip** — drag it to another cell (clips swap).
 - **Import audio** — drag an audio file from Finder onto a cell.
 - **Recolour / delete** — right-click a clip.
