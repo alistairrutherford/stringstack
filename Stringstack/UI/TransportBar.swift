@@ -116,11 +116,10 @@ struct TransportBar: View {
         let beats = engine.currentBeats
         if engine.mode == .stopped { return "1.1.1" }
         if beats < 0 {
-            // Counting in: show bars remaining and the beat being counted.
+            // Counting in: plain countdown of bars remaining (e.g. 2 → 1).
             let elapsed = beats + Double(engine.activeCountInBeats)
-            let beatNumber = Int(elapsed) % engine.beatsPerBar + 1
             let barsRemaining = engine.countInBars - Int(elapsed) / engine.beatsPerBar
-            return "-\(barsRemaining).\(beatNumber)"
+            return "\(max(1, barsRemaining))"
         }
         let whole = Int(beats)
         let bar = whole / engine.beatsPerBar + 1
