@@ -74,8 +74,17 @@ struct TransportBar: View {
                 engine.record()
             }
             .keyboardShortcut("r", modifiers: [])
-            .help("Record into the armed track's next empty slot (R)")
+            .disabled(!recordEnabled)
+            .opacity(recordEnabled ? 1 : 0.35)
+            .help(recordEnabled
+                  ? "Record into the selected cell (R)"
+                  : "Arm the selected track to enable recording")
         }
+    }
+
+    /// Record is possible only while stopped/playing with an armed target.
+    private var recordEnabled: Bool {
+        engine.mode == .recording || engine.canRecord
     }
 
     // MARK: - Position

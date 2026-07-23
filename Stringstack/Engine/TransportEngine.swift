@@ -726,32 +726,30 @@ final class TransportEngine {
 
     // MARK: - Recording
 
-    /// R key / record button: always record into the currently selected cell
-    /// (track x, scene y). Only when nothing is selected does it fall back to
-    /// the armed track's first empty slot. The target cell's track is armed
-    /// automatically, since recording uses the single input.
+    /// Recording is only possible when the currently selected track is armed.
+    var canRecord: Bool {
+        recordingSlot == nil && (selectedTrack?.isArmed ?? false)
+    }
+
+    /// R key / record button: record into the selected track. Only available
+    /// when the selected track is armed. Targets the selected cell on that
+    /// track, or its first empty slot if no cell on it is selected.
     func record() {
         guard recordingSlot == nil else { return }
-
-        let target: (track: Track, scene: Int)?
-        if let slot = selectedSlot,
-           let track = tracks.first(where: { $0.id == slot.trackID }),
-           slot.scene < track.slots.count {
-            target = (track, slot.scene)
-        } else if let track = armedTrack,
-                  let scene = track.slots.firstIndex(where: { $0 == nil }) {
-            target = (track, scene)
-        } else {
-            target = nil
-        }
-
-        guard let target else {
-            statusMessage = "Select a cell to record into."
+        guard let track = selectedTrack, track.isArmed else {
+            statusMessage = "Arm the selected track (● in its header) to record."
             return
         }
-        // Recording uses one input, so make the selected cell's track armed.
-        if !target.track.isArmed { armOnly(target.track) }
-        recordIntoSlot(target.track, scene: target.scene)
+        let scene: Int
+        if let slot = selectedSlot, slot.trackID == track.id, slot.scene < track.slots.count {
+            scene = slot.scene
+        } else if let firstEmpty = track.slots.firstIndex(where: { $0 == nil }) {
+            scene = firstEmpty
+        } else {
+            statusMessage = "No empty slot on \(track.name) — select a clip to overwrite or overdub."
+            return
+        }
+        recordIntoSlot(track, scene: scene)
     }
 
     /// Records into a cell. Empty → new clip. Occupied → overdub (layer) or

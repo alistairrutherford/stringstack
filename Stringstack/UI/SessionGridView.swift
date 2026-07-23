@@ -398,12 +398,11 @@ private struct ClipCell: View {
         Button {
             if isRecordingHere {
                 engine.finishRecordingAndPlay()
-            } else if track.isArmed {
-                engine.recordIntoSlot(track, scene: scene)
             } else if engine.mode != .stopped {
                 engine.stopClip(on: track)
             }
-            // Otherwise just select the cell (handled by the cell gesture).
+            // Otherwise just select the cell (handled by the cell gesture) —
+            // recording is started only from the record button / R key.
         } label: {
             ZStack {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -423,7 +422,9 @@ private struct ClipCell: View {
             }
         }
         .buttonStyle(.plain)
-        .help(track.isArmed ? "Record into this slot" : "Stop this track's clip")
+        .help(isRecordingHere
+              ? "Recording — click to finish and loop"
+              : "Click to select · use the record button to record here")
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
