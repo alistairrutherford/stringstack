@@ -6,7 +6,10 @@ private enum GridMetrics {
     static let cellHeight: CGFloat = 46
     static let headerHeight: CGFloat = 108
     static let sceneWidth: CGFloat = 44
+    static let sceneStopWidth: CGFloat = 30
     static let spacing: CGFloat = 7
+    /// Full width of the scene launch/stop column pair.
+    static var sceneAreaWidth: CGFloat { sceneWidth + spacing + sceneStopWidth }
 }
 
 /// The Ableton-style session view: tracks as columns, scenes as rows.
@@ -35,7 +38,7 @@ struct SessionGridView: View {
     private var sceneHighlight: some View {
         if let scene = engine.selectedScene, scene < engine.sceneCount {
             let columnStep = GridMetrics.cellWidth + GridMetrics.spacing + 3
-            let width = GridMetrics.sceneWidth + CGFloat(engine.tracks.count) * columnStep
+            let width = GridMetrics.sceneAreaWidth + CGFloat(engine.tracks.count) * columnStep
             let y = GridMetrics.headerHeight + GridMetrics.spacing
                 + CGFloat(scene) * (GridMetrics.cellHeight + GridMetrics.spacing)
 
@@ -55,27 +58,24 @@ struct SessionGridView: View {
 
     private var sceneColumn: some View {
         VStack(spacing: GridMetrics.spacing) {
-            Text("SCENES")
-                .font(.system(size: 9, weight: .heavy))
-                .tracking(1.5)
-                .foregroundStyle(Theme.dimmed)
-                .frame(width: GridMetrics.sceneWidth, height: GridMetrics.headerHeight)
+            HStack(spacing: GridMetrics.spacing) {
+                Text("SCENES")
+                    .font(.system(size: 9, weight: .heavy))
+                    .tracking(1.5)
+                    .foregroundStyle(Theme.dimmed)
+                    .frame(width: GridMetrics.sceneWidth)
+                Image(systemName: "stop")
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundStyle(Theme.dimmed)
+                    .frame(width: GridMetrics.sceneStopWidth)
+            }
+            .frame(height: GridMetrics.headerHeight)
 
             ForEach(0..<engine.sceneCount, id: \.self) { scene in
-                Button {
-                    engine.launchScene(scene)
-                } label: {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Theme.violet)
-                        .frame(width: GridMetrics.sceneWidth, height: GridMetrics.cellHeight)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Theme.surface)
-                        )
+                HStack(spacing: GridMetrics.spacing) {
+                    SceneLaunchButton(scene: scene)
+                    SceneStopButton(scene: scene)
                 }
-                .buttonStyle(.plain)
-                .help("Launch scene \(scene + 1)")
             }
 
             Button {
@@ -84,25 +84,10 @@ struct SessionGridView: View {
                 Image(systemName: "plus")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(Theme.dimmed)
-                    .frame(width: GridMetrics.sceneWidth, height: 26)
+                    .frame(width: GridMetrics.sceneAreaWidth, height: 26)
             }
             .buttonStyle(.plain)
             .help("Add scene")
-
-            Button {
-                engine.stopAllClips()
-            } label: {
-                Image(systemName: "stop.fill")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Theme.coral)
-                    .frame(width: GridMetrics.sceneWidth, height: GridMetrics.cellHeight)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Theme.surface)
-                    )
-            }
-            .buttonStyle(.plain)
-            .help("Stop all clips")
         }
     }
 
@@ -126,6 +111,79 @@ struct SessionGridView: View {
         }
         .buttonStyle(.plain)
         .help("Add track")
+    }
+}
+
+// MARK: - Scene buttons
+
+/// Scene launch triangle that pulses on each beat while the transport rolls,
+/// like Ableton's animated launch buttons.
+private struct SceneLaunchButton: View {
+    @Environment(TransportEngine.self) private var engine
+    let scene: Int
+
+    private var isSelected: Bool { engine.selectedScene == scene }
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: nil,
+                                paused: engine.mode == .stopped || !isSelected)) { _ in
+            let beats = engine.currentBeats
+            // Only the selected scene's launch button pulses with the beat.
+            let playing = isSelected && engine.mode != .stopped && beats >= 0
+            // 1 at the start of each beat, decaying to 0 before the next.
+            let pulse = playing ? pow(1 - (beats - beats.rounded(.down)), 2) : 0
+
+            Button {
+                engine.launchScene(scene)
+            } label: {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Theme.violet)
+                    .scaleEffect(1 + 0.35 * pulse)
+                    .frame(width: GridMetrics.sceneWidth, height: GridMetrics.cellHeight)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Theme.surface)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(Theme.violet.opacity(0.30 * pulse))
+                            )
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Launch scene \(scene + 1)")
+        }
+    }
+}
+
+/// Clear (outlined) square scene-stop button that flashes briefly on click,
+/// and triggers the same full stop as the main transport button.
+private struct SceneStopButton: View {
+    @Environment(TransportEngine.self) private var engine
+    let scene: Int
+    @State private var flash = false
+
+    var body: some View {
+        Button {
+            engine.selectScene(scene)
+            engine.stop()
+            flash = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+                withAnimation(.easeOut(duration: 0.35)) { flash = false }
+            }
+        } label: {
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(Color.white.opacity(flash ? 0.7 : 0))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.4), lineWidth: 1.5)
+                )
+                .frame(width: 15, height: 15)
+                .frame(width: GridMetrics.sceneStopWidth, height: GridMetrics.cellHeight)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Stop — same as the main stop button")
     }
 }
 

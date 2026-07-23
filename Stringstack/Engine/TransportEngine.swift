@@ -541,8 +541,18 @@ final class TransportEngine {
 
     // MARK: - Transport
 
+    /// Main Play launches the currently selected scene (or just starts the
+    /// transport if no scene is selected); Play again stops.
     func togglePlayStop() {
-        mode == .stopped ? play() : stop()
+        if mode == .stopped {
+            if let scene = selectedScene {
+                launchScene(scene)
+            } else {
+                play()
+            }
+        } else {
+            stop()
+        }
     }
 
     func play() {
