@@ -254,6 +254,38 @@ final class TransportEngine {
         }
     }
 
+    /// Reorders a scene row (drag up/down). Every track's slots are permuted
+    /// identically; numbering stays consecutive since it's just row index + 1.
+    func moveScene(from source: Int, to destination: Int) {
+        guard source != destination,
+              source >= 0, source < sceneCount,
+              destination >= 0, destination < sceneCount else { return }
+        for track in tracks {
+            let moved = track.slots.remove(at: source)
+            track.slots.insert(moved, at: destination)
+        }
+        selectedScene = remapSceneIndex(selectedScene, from: source, to: destination)
+        if let slot = selectedSlot {
+            selectedSlot = SlotRef(trackID: slot.trackID,
+                                   scene: remapSceneIndex(slot.scene, from: source, to: destination) ?? slot.scene)
+        }
+        if let slot = recordingSlot {
+            recordingSlot = SlotRef(trackID: slot.trackID,
+                                    scene: remapSceneIndex(slot.scene, from: source, to: destination) ?? slot.scene)
+        }
+        markDirty()
+        registerUndo("Move Scene") { $0.moveScene(from: destination, to: source) }
+    }
+
+    /// Where a row index ends up after moving `source` to `destination`.
+    private func remapSceneIndex(_ index: Int?, from source: Int, to destination: Int) -> Int? {
+        guard let index else { return nil }
+        if index == source { return destination }
+        if source < destination, index > source, index <= destination { return index - 1 }
+        if source > destination, index >= destination, index < source { return index + 1 }
+        return index
+    }
+
     /// Whether a scene row holds at least one clip (drives the enabled state
     /// of "Duplicate Scene").
     func sceneHasClips(_ scene: Int) -> Bool {

@@ -79,11 +79,7 @@ struct SessionGridView: View {
             .frame(height: GridMetrics.headerHeight)
 
             ForEach(0..<engine.sceneCount, id: \.self) { scene in
-                HStack(spacing: GridMetrics.spacing) {
-                    SceneNumberLabel(scene: scene)
-                    SceneLaunchButton(scene: scene)
-                    SceneStopButton(scene: scene)
-                }
+                SceneRow(scene: scene)
             }
 
             Button {
@@ -138,13 +134,57 @@ private struct SceneNumberLabel: View {
             .frame(width: GridMetrics.sceneNumberWidth, height: GridMetrics.cellHeight)
             .contentShape(Rectangle())
             .onTapGesture { engine.selectScene(scene) }
+            .onDrag { NSItemProvider(object: "scenemove:\(scene)" as NSString) }
             .contextMenu {
                 Button("Duplicate Scene") { engine.duplicateScene(scene) }
                     .disabled(!engine.sceneHasClips(scene))
                 Divider()
                 Button("Delete Scene", role: .destructive) { engine.deleteScene(scene) }
             }
-            .help("Scene \(scene + 1) — right-click to duplicate or delete")
+            .help("Scene \(scene + 1) — drag to reorder · right-click to duplicate or delete")
+    }
+}
+
+/// One scene row (number + launch + stop) that accepts a dragged scene to
+/// reorder it here.
+private struct SceneRow: View {
+    @Environment(TransportEngine.self) private var engine
+    let scene: Int
+    @State private var dropTargeted = false
+
+    var body: some View {
+        HStack(spacing: GridMetrics.spacing) {
+            SceneNumberLabel(scene: scene)
+            SceneLaunchButton(scene: scene)
+            SceneStopButton(scene: scene)
+        }
+        .overlay(alignment: .top) {
+            if dropTargeted {
+                Capsule()
+                    .fill(Theme.violet)
+                    .frame(height: 3)
+                    .offset(y: -4)
+            }
+        }
+        .onDrop(of: [UTType.plainText], isTargeted: $dropTargeted) { providers in
+            handleSceneDrop(providers, onto: scene)
+        }
+    }
+
+    private func handleSceneDrop(_ providers: [NSItemProvider], onto target: Int) -> Bool {
+        guard let provider = providers.first(where: {
+            $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier)
+        }) else { return false }
+        provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { item, _ in
+            var payload: String?
+            if let data = item as? Data { payload = String(data: data, encoding: .utf8) }
+            else if let text = item as? String { payload = text }
+            else if let text = item as? NSString { payload = text as String }
+            guard let payload, payload.hasPrefix("scenemove:"),
+                  let source = Int(payload.dropFirst("scenemove:".count)) else { return }
+            Task { @MainActor in engine.moveScene(from: source, to: target) }
+        }
+        return true
     }
 }
 
