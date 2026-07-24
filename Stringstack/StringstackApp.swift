@@ -45,6 +45,8 @@ struct StringstackApp: App {
                 }
                 .keyboardShortcut("s", modifiers: [.option])
                 Divider()
+                Button("Duplicate Selected Clip") { engine.duplicateSelectedClip() }
+                    .keyboardShortcut("d")
                 Button("Delete Selected Clip") { engine.deleteSelectedClip() }
                     .keyboardShortcut(.delete, modifiers: [.command])
             }

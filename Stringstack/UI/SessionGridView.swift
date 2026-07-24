@@ -5,11 +5,14 @@ private enum GridMetrics {
     static let cellWidth: CGFloat = 136
     static let cellHeight: CGFloat = 46
     static let headerHeight: CGFloat = 108
+    static let sceneNumberWidth: CGFloat = 22
     static let sceneWidth: CGFloat = 44
     static let sceneStopWidth: CGFloat = 30
     static let spacing: CGFloat = 7
-    /// Full width of the scene launch/stop column pair.
-    static var sceneAreaWidth: CGFloat { sceneWidth + spacing + sceneStopWidth }
+    /// Full width of the scene number + launch + stop column group.
+    static var sceneAreaWidth: CGFloat {
+        sceneNumberWidth + spacing + sceneWidth + spacing + sceneStopWidth
+    }
 }
 
 /// The Ableton-style session view: tracks as columns, scenes as rows.
@@ -59,6 +62,10 @@ struct SessionGridView: View {
     private var sceneColumn: some View {
         VStack(spacing: GridMetrics.spacing) {
             HStack(spacing: GridMetrics.spacing) {
+                Text("#")
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundStyle(Theme.dimmed)
+                    .frame(width: GridMetrics.sceneNumberWidth)
                 Text("SCENES")
                     .font(.system(size: 9, weight: .heavy))
                     .tracking(1.5)
@@ -73,6 +80,7 @@ struct SessionGridView: View {
 
             ForEach(0..<engine.sceneCount, id: \.self) { scene in
                 HStack(spacing: GridMetrics.spacing) {
+                    SceneNumberLabel(scene: scene)
                     SceneLaunchButton(scene: scene)
                     SceneStopButton(scene: scene)
                 }
@@ -115,6 +123,30 @@ struct SessionGridView: View {
 }
 
 // MARK: - Scene buttons
+
+/// Consecutive scene number (always row index + 1, so it stays 1,2,3… after
+/// any duplicate/delete). Right-click for scene duplicate/delete.
+private struct SceneNumberLabel: View {
+    @Environment(TransportEngine.self) private var engine
+    let scene: Int
+
+    var body: some View {
+        Text("\(scene + 1)")
+            .font(.system(size: 11, weight: .heavy, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(engine.selectedScene == scene ? Theme.violet : Theme.dimmed)
+            .frame(width: GridMetrics.sceneNumberWidth, height: GridMetrics.cellHeight)
+            .contentShape(Rectangle())
+            .onTapGesture { engine.selectScene(scene) }
+            .contextMenu {
+                Button("Duplicate Scene") { engine.duplicateScene(scene) }
+                    .disabled(!engine.sceneHasClips(scene))
+                Divider()
+                Button("Delete Scene", role: .destructive) { engine.deleteScene(scene) }
+            }
+            .help("Scene \(scene + 1) — right-click to duplicate or delete")
+    }
+}
 
 /// Scene launch triangle that pulses on each beat while the transport rolls,
 /// like Ableton's animated launch buttons.
@@ -420,7 +452,9 @@ private struct ClipCell: View {
     let scene: Int
     @State private var dropTargeted = false
 
-    private var clip: Clip? { track.slots[scene] }
+    // Bounds-safe: a row view can briefly hold a stale index while the grid
+    // reconciles after a scene is deleted.
+    private var clip: Clip? { scene < track.slots.count ? track.slots[scene] : nil }
     private var slotRef: SlotRef { SlotRef(trackID: track.id, scene: scene) }
     private var state: TrackPlayback? { engine.playback[track.id] }
     private var isRecordingHere: Bool { engine.recordingSlot == slotRef }
@@ -551,12 +585,19 @@ private struct FilledCell: View {
             NSItemProvider(object: "clipmove:\(track.id.uuidString):\(scene)" as NSString)
         }
         .contextMenu {
-            ForEach(0..<Theme.trackPalette.count, id: \.self) { index in
-                Button {
-                    engine.setClipColor(clip, colorIndex: index)
-                } label: {
-                    Label(Theme.paletteNames[index],
-                          systemImage: clip.colorIndex == index ? "checkmark.circle.fill" : "circle.fill")
+            Button("Duplicate") {
+                engine.duplicateClipDown(clip, on: track, scene: scene)
+            }
+            .keyboardShortcut("d")
+            Divider()
+            Menu("Colour") {
+                ForEach(0..<Theme.trackPalette.count, id: \.self) { index in
+                    Button {
+                        engine.setClipColor(clip, colorIndex: index)
+                    } label: {
+                        Label(Theme.paletteNames[index],
+                              systemImage: clip.colorIndex == index ? "checkmark.circle.fill" : "circle.fill")
+                    }
                 }
             }
             Divider()

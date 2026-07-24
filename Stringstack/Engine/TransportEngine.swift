@@ -238,6 +238,99 @@ final class TransportEngine {
         markDirty()
     }
 
+    /// Inserts an empty scene row at `index`, shifting later rows (and any
+    /// anchored selection/recording) down. Does not mark dirty — the caller
+    /// does, as part of a larger edit.
+    func insertScene(at index: Int) {
+        let clamped = max(0, min(index, sceneCount))
+        for track in tracks { track.slots.insert(nil, at: clamped) }
+        sceneCount += 1
+        if let scene = selectedScene, scene >= clamped { selectedScene = scene + 1 }
+        if let slot = selectedSlot, slot.scene >= clamped {
+            selectedSlot = SlotRef(trackID: slot.trackID, scene: slot.scene + 1)
+        }
+        if let slot = recordingSlot, slot.scene >= clamped {
+            recordingSlot = SlotRef(trackID: slot.trackID, scene: slot.scene + 1)
+        }
+    }
+
+    /// Whether a scene row holds at least one clip (drives the enabled state
+    /// of "Duplicate Scene").
+    func sceneHasClips(_ scene: Int) -> Bool {
+        guard scene >= 0, scene < sceneCount else { return false }
+        return tracks.contains { scene < $0.slots.count && $0.slots[scene] != nil }
+    }
+
+    /// Right-click a scene number: duplicate the whole row (all its clips)
+    /// into a new scene inserted directly below.
+    func duplicateScene(_ scene: Int) {
+        guard scene >= 0, scene < sceneCount else { return }
+        let targetScene = scene + 1
+        insertScene(at: targetScene)
+        for track in tracks {
+            if let clip = track.slots[scene] {
+                track.slots[targetScene] = duplicate(of: clip)
+            }
+        }
+        markDirty()
+        selectedScene = targetScene
+        registerUndo("Duplicate Scene") { engine in
+            engine.removeScene(at: targetScene)
+            engine.markDirty()
+            engine.registerUndo("Duplicate Scene") { $0.duplicateScene(scene) }
+        }
+    }
+
+    /// Right-click a scene number: delete the whole row (undoable). The grid
+    /// can be emptied entirely; add rows again with the + button.
+    func deleteScene(_ scene: Int) {
+        guard scene >= 0, scene < sceneCount else { return }
+        let saved: [(trackID: UUID, clip: Clip)] = tracks.compactMap { track in
+            track.slots[scene].map { (track.id, $0) }
+        }
+        removeScene(at: scene)
+        markDirty()
+        registerUndo("Delete Scene") { engine in
+            engine.insertScene(at: scene)
+            for entry in saved {
+                if let track = engine.tracks.first(where: { $0.id == entry.trackID }),
+                   scene < track.slots.count {
+                    track.slots[scene] = entry.clip
+                }
+            }
+            engine.markDirty()
+            engine.registerUndo("Delete Scene") { $0.deleteScene(scene) }
+        }
+    }
+
+    /// Removes the scene row at `index`, stopping any clip playing in it and
+    /// shifting later rows up.
+    func removeScene(at index: Int) {
+        guard index >= 0, index < sceneCount else { return }
+        for track in tracks {
+            if let clip = track.slots[index],
+               let state = playback[track.id],
+               state.playingClipID == clip.id || state.queuedClipID == clip.id,
+               let channel = graph.channel(for: track.id) {
+                channel.pendingTask?.cancel()
+                channel.stopAllPlayers()
+                playback[track.id] = TrackPlayback()
+            }
+            track.slots.remove(at: index)
+        }
+        sceneCount -= 1
+        if let scene = selectedScene {
+            if scene > index { selectedScene = scene - 1 }
+            else if scene == index { selectedScene = sceneCount > 0 ? min(index, sceneCount - 1) : nil }
+        }
+        if let slot = selectedSlot {
+            if slot.scene == index { selectedSlot = nil }
+            else if slot.scene > index {
+                selectedSlot = SlotRef(trackID: slot.trackID, scene: slot.scene - 1)
+            }
+        }
+    }
+
     /// Selecting a track drops any clip selection on other tracks, so DEL
     /// always targets what the eye is on.
     func selectTrack(_ track: Track) {
@@ -917,6 +1010,58 @@ final class TransportEngine {
         clip.colorIndex = colorIndex
         markDirty()
         registerUndo("Recolour Clip") { $0.setClipColor(clip, colorIndex: previous) }
+    }
+
+    /// ⌘D / Track menu: duplicate the selected clip into the scene below.
+    func duplicateSelectedClip() {
+        guard let slot = selectedSlot,
+              let track = tracks.first(where: { $0.id == slot.trackID }),
+              slot.scene < track.slots.count, let clip = track.slots[slot.scene] else { return }
+        duplicateClipDown(clip, on: track, scene: slot.scene)
+    }
+
+    /// Duplicates a clip into the scene below on the same track:
+    /// - empty slot below → duplicate into it;
+    /// - occupied slot below → insert a new scene there and duplicate into it;
+    /// - no scene below → append a scene and duplicate into it.
+    func duplicateClipDown(_ clip: Clip, on track: Track, scene: Int) {
+        guard scene >= 0, scene < track.slots.count, let original = track.slots[scene] else { return }
+        let targetScene = scene + 1
+        let copy = duplicate(of: original)
+
+        let insertedScene: Bool
+        if targetScene >= sceneCount {
+            insertScene(at: sceneCount)
+            insertedScene = true
+        } else if track.slots[targetScene] != nil {
+            insertScene(at: targetScene)
+            insertedScene = true
+        } else {
+            insertedScene = false
+        }
+        track.slots[targetScene] = copy
+        markDirty()
+        selectTrack(track)
+        selectedScene = targetScene
+        selectedSlot = SlotRef(trackID: track.id, scene: targetScene)
+
+        registerUndo("Duplicate Clip") { engine in
+            if insertedScene {
+                engine.removeScene(at: targetScene)
+            } else if targetScene < track.slots.count {
+                track.slots[targetScene] = nil
+            }
+            engine.markDirty()
+            engine.registerUndo("Duplicate Clip") { redo in
+                redo.duplicateClipDown(clip, on: track, scene: scene)
+            }
+        }
+    }
+
+    /// A fresh copy sharing the (immutable) audio buffer, with a new id.
+    private func duplicate(of clip: Clip) -> Clip {
+        Clip(name: clip.name, colorIndex: clip.colorIndex, buffer: clip.buffer,
+             loopBars: clip.loopBars, fileURL: clip.fileURL)
     }
 
     /// DEL key / Track menu: delete the last-clicked clip.
