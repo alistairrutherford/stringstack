@@ -102,7 +102,7 @@ final class TransportEngine {
 
     var masterVolume = 0.9 {
         didSet {
-            audioEngine.mainMixerNode.outputVolume = Float(masterVolume)
+            graph.setMasterVolume(masterVolume)
             markDirty()
         }
     }
@@ -110,11 +110,10 @@ final class TransportEngine {
     /// Total count-in beats of the transport run currently in progress.
     @ObservationIgnored private(set) var activeCountInBeats = 0
 
-    @ObservationIgnored private let audioEngine = AVAudioEngine()
+    /// The AVAudioEngine node graph (channels, mixing, effects, lifecycle).
+    @ObservationIgnored private let graph = AudioGraph()
     @ObservationIgnored private let metronome: MetronomeSource
     @ObservationIgnored private let recorder = RecordingService()
-    @ObservationIgnored let masterMeter = MeterTap()
-    @ObservationIgnored private var channels: [UUID: TrackChannel] = [:]
     @ObservationIgnored private var beat0Host: UInt64 = 0
     @ObservationIgnored private var recordTempo: Double = 120
     @ObservationIgnored private var recordStartBeat = 0.0
@@ -126,9 +125,11 @@ final class TransportEngine {
     @ObservationIgnored private var recordBarsOverride: Int?
     /// A Replace-mode take that must clear its slot once recording begins.
     @ObservationIgnored private var replaceClearPending = false
-    /// Every clip buffer is converted to this on creation, so any clip can
-    /// play on any (permanently connected) track player.
-    @ObservationIgnored private(set) var standardFormat: AVAudioFormat
+
+    /// Standard clip format — the graph normalises every buffer to it.
+    var standardFormat: AVAudioFormat { graph.standardFormat }
+    /// Master output meter, polled by the mixer UI.
+    var masterMeter: MeterTap { graph.masterMeter }
 
     /// Beats since bar 1 started; negative while counting in. Poll, don't observe.
     var currentBeats: Double { metronome.currentBeats }
@@ -141,16 +142,12 @@ final class TransportEngine {
     var armedTrack: Track? { tracks.first { $0.isArmed } }
 
     init() {
-        var sampleRate = audioEngine.outputNode.outputFormat(forBus: 0).sampleRate
-        if sampleRate <= 0 { sampleRate = 44100 }
-        metronome = MetronomeSource(sampleRate: sampleRate)
-        standardFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
+        metronome = MetronomeSource(sampleRate: graph.sampleRate)
 
-        audioEngine.attach(metronome.node)
-        audioEngine.connect(metronome.node, to: audioEngine.mainMixerNode, format: nil)
-        audioEngine.mainMixerNode.outputVolume = Float(masterVolume)
+        graph.attachSource(metronome.node)
+        graph.setMasterVolume(masterVolume)
         startEngine()
-        masterMeter.install(on: audioEngine.mainMixerNode)
+        graph.installMasterMeter()
 
         for index in 0..<4 { addTrack(named: "Track \(index + 1)") }
         selectedTrackID = tracks.first?.id
@@ -210,17 +207,7 @@ final class TransportEngine {
         let track = Track(name: name ?? "Track \(tracks.count + 1)",
                           colorIndex: tracks.count % 6,
                           sceneCount: sceneCount)
-        let channel = TrackChannel()
-        audioEngine.attach(channel.mixer)
-        audioEngine.attach(channel.players[0])
-        audioEngine.attach(channel.players[1])
-        audioEngine.attach(channel.inputMixer)
-        audioEngine.connect(channel.players[0], to: channel.inputMixer, format: standardFormat)
-        audioEngine.connect(channel.players[1], to: channel.inputMixer, format: standardFormat)
-        audioEngine.connect(channel.inputMixer, to: channel.mixer, format: standardFormat)
-        audioEngine.connect(channel.mixer, to: audioEngine.mainMixerNode, format: nil)
-        channel.meter.install(on: channel.mixer)
-        channels[track.id] = channel
+        graph.addChannel(for: track.id)
         tracks.append(track)
         applyMix(track)
         markDirty()
@@ -230,19 +217,10 @@ final class TransportEngine {
         if recordingSlot?.trackID == track.id { stop() }
         for effect in track.effects {
             PluginWindows.close(effect.id)
-            audioEngine.detach(effect.node)
+            graph.detachEffect(effect.node)
         }
         track.effects.removeAll()
-        if let channel = channels[track.id] {
-            channel.pendingTask?.cancel()
-            channel.stopAllPlayers()
-            channel.mixer.removeTap(onBus: 0)
-            audioEngine.detach(channel.players[0])
-            audioEngine.detach(channel.players[1])
-            audioEngine.detach(channel.inputMixer)
-            audioEngine.detach(channel.mixer)
-        }
-        channels.removeValue(forKey: track.id)
+        graph.removeChannel(for: track.id)
         playback.removeValue(forKey: track.id)
         tracks.removeAll { $0.id == track.id }
         if selectedTrackID == track.id { selectedTrackID = tracks.first?.id }
@@ -313,7 +291,7 @@ final class TransportEngine {
     }
 
     func meterLevels(for track: Track) -> (left: Double, right: Double) {
-        channels[track.id]?.meter.levels ?? (0, 0)
+        graph.meterLevels(for: track.id)
     }
 
     private func applyMixAll() {
@@ -321,11 +299,9 @@ final class TransportEngine {
     }
 
     private func applyMix(_ track: Track) {
-        guard let channel = channels[track.id] else { return }
         let anySolo = tracks.contains { $0.isSoloed }
         let audible = !track.isMuted && (!anySolo || track.isSoloed)
-        channel.mixer.outputVolume = audible ? Float(track.volume) : 0
-        channel.mixer.pan = Float(track.pan)
+        graph.setMix(for: track.id, volume: track.volume, pan: track.pan, audible: audible)
     }
 
     // MARK: - AU effects
@@ -345,11 +321,11 @@ final class TransportEngine {
         Task {
             do {
                 let unit = try await AVAudioUnit.instantiate(with: description, options: [])
-                audioEngine.attach(unit)
+                graph.attachEffect(unit)
                 let effect = EffectInstance(name: name, manufacturer: manufacturer,
                                             componentDescription: description, node: unit)
                 track.effects.append(effect)
-                rebuildChain(for: track)
+                graph.rebuildChain(for: track.id, effects: track.effects)
                 markDirty()
                 statusMessage = nil
             } catch {
@@ -361,8 +337,8 @@ final class TransportEngine {
     func removeEffect(_ effect: EffectInstance, from track: Track) {
         PluginWindows.close(effect.id)
         track.effects.removeAll { $0.id == effect.id }
-        rebuildChain(for: track)
-        audioEngine.detach(effect.node)
+        graph.rebuildChain(for: track.id, effects: track.effects)
+        graph.detachEffect(effect.node)
         markDirty()
     }
 
@@ -372,24 +348,8 @@ final class TransportEngine {
         let target = index + offset
         guard target >= 0, target < track.effects.count else { return }
         track.effects.swapAt(index, target)
-        rebuildChain(for: track)
+        graph.rebuildChain(for: track.id, effects: track.effects)
         markDirty()
-    }
-
-    /// Reconnects inputMixer → effects… → fader mixer in chain order.
-    /// Bypass doesn't rebuild — it uses `shouldBypassEffect` on the node.
-    private func rebuildChain(for track: Track) {
-        guard let channel = channels[track.id] else { return }
-        audioEngine.disconnectNodeOutput(channel.inputMixer)
-        for effect in track.effects {
-            audioEngine.disconnectNodeOutput(effect.node)
-        }
-        var current: AVAudioNode = channel.inputMixer
-        for effect in track.effects {
-            audioEngine.connect(current, to: effect.node, format: standardFormat)
-            current = effect.node
-        }
-        audioEngine.connect(current, to: channel.mixer, format: standardFormat)
     }
 
     /// Re-instantiates a saved effect and applies its archived state.
@@ -398,7 +358,7 @@ final class TransportEngine {
                        state: Data?, bypassed: Bool, on track: Track) async {
         do {
             let unit = try await AVAudioUnit.instantiate(with: description, options: [])
-            audioEngine.attach(unit)
+            graph.attachEffect(unit)
             if let state,
                let unarchiver = try? NSKeyedUnarchiver(forReadingFrom: state) {
                 unarchiver.requiresSecureCoding = false
@@ -410,7 +370,7 @@ final class TransportEngine {
                                         componentDescription: description, node: unit)
             effect.isBypassed = bypassed
             track.effects.append(effect)
-            rebuildChain(for: track)
+            graph.rebuildChain(for: track.id, effects: track.effects)
         } catch {
             statusMessage = "Couldn't restore effect \(name) — is the plugin still installed?"
         }
@@ -486,7 +446,7 @@ final class TransportEngine {
                 inputDebugLog("attempt 2 (no device set) OK")
             } catch {
                 inputDebugLog("attempt 2 failed: \(error)")
-                recorder.removeTap(from: audioEngine.inputNode)
+                recorder.removeTap(from: graph.inputNode)
                 inputConfigured = false
                 engineError = "Could not configure input: \(error.localizedDescription) — if this app was rebuilt recently, macOS may hold a stale microphone grant; run `tccutil reset Microphone com.example.Stringstack` in Terminal and try again."
                 startEngine()
@@ -499,19 +459,18 @@ final class TransportEngine {
     /// the input bus reports real formats; the tap must be in place before
     /// start so the input unit comes up connected.
     private func restartEngineWithInput(setDevice: Bool) throws {
-        let input = audioEngine.inputNode
-        audioEngine.stop()
+        let input = graph.inputNode
+        graph.stop()
         recorder.removeTap(from: input)
-        audioEngine.reset()
+        graph.reset()
         if setDevice {
             try devices.applySelectedDevice(to: input)
         }
-        audioEngine.prepare()
+        graph.prepare()
 
-        let sharedUnit = input.audioUnit != nil && input.audioUnit == audioEngine.outputNode.audioUnit
         let hardware = input.inputFormat(forBus: 0)
         let bus = input.outputFormat(forBus: 0)
-        inputDebugLog("bring-up setDevice=\(setDevice) sharedIOUnit=\(sharedUnit) hw=\(Int(hardware.sampleRate))Hz/\(hardware.channelCount)ch bus=\(Int(bus.sampleRate))Hz/\(bus.channelCount)ch")
+        inputDebugLog("bring-up setDevice=\(setDevice) sharedIOUnit=\(graph.sharesIOUnit) hw=\(Int(hardware.sampleRate))Hz/\(hardware.channelCount)ch bus=\(Int(bus.sampleRate))Hz/\(bus.channelCount)ch")
 
         guard hardware.sampleRate > 0, hardware.channelCount > 0 else {
             throw NSError(domain: "Stringstack", code: 4, userInfo: [
@@ -519,7 +478,7 @@ final class TransportEngine {
             ])
         }
         recorder.installTap(on: input)
-        try audioEngine.start()
+        try graph.startThrowing()
     }
 
     /// Appends a line to Application Support/input-debug.log so input
@@ -573,7 +532,7 @@ final class TransportEngine {
         overdubSource = nil
         recordBarsOverride = nil
         replaceClearPending = false
-        for channel in channels.values {
+        for channel in graph.channels.values {
             channel.pendingTask?.cancel()
             channel.pendingTask = nil
             channel.stopAllPlayers()
@@ -655,7 +614,7 @@ final class TransportEngine {
     }
 
     private func scheduleLaunch(clip: Clip, on track: Track, boundary: Double, hostTime: UInt64) {
-        guard let channel = channels[track.id] else { return }
+        guard let channel = graph.channel(for: track.id) else { return }
 
         let idleIndex = 1 - channel.activeIndex
         let player = channel.players[idleIndex]
@@ -685,7 +644,7 @@ final class TransportEngine {
     }
 
     private func scheduleStop(on track: Track, boundary: Double) {
-        guard let channel = channels[track.id] else { return }
+        guard let channel = graph.channel(for: track.id) else { return }
         var state = playback[track.id] ?? TrackPlayback()
         state.stopQueued = true
         state.queuedClipID = nil
@@ -705,7 +664,7 @@ final class TransportEngine {
     /// at `loopStartBeat`: the first pass plays from the current in-loop
     /// offset, then the full buffer loops.
     private func launchInProgress(clip: Clip, on track: Track, loopStartBeat: Double) {
-        guard let channel = channels[track.id] else { return }
+        guard let channel = graph.channel(for: track.id) else { return }
         let loopBeats = Double(clip.loopBars * beatsPerBar)
         guard loopBeats > 0 else { return }
         let framesPerBeat = 60.0 / tempo * standardFormat.sampleRate
@@ -796,7 +755,7 @@ final class TransportEngine {
     }
 
     private func stopTrackPlayback(_ track: Track) {
-        guard let channel = channels[track.id] else { return }
+        guard let channel = graph.channel(for: track.id) else { return }
         channel.pendingTask?.cancel()
         channel.pendingTask = nil
         channel.stopAllPlayers()
@@ -806,7 +765,7 @@ final class TransportEngine {
     /// Loops `clip` starting exactly at `host` for overdub monitoring, so the
     /// performer hears the existing take while recording the new layer.
     private func startMonitorPlayback(_ clip: Clip, on track: Track, atHost host: UInt64) {
-        guard let channel = channels[track.id] else { return }
+        guard let channel = graph.channel(for: track.id) else { return }
         let index = channel.activeIndex
         let player = channel.players[index]
         player.stop()
@@ -1006,6 +965,16 @@ final class TransportEngine {
 
     // MARK: - Clip management
 
+    /// Recolour a clip — routed through the engine so it marks the project
+    /// dirty and registers undo, rather than the view mutating the model.
+    func setClipColor(_ clip: Clip, colorIndex: Int) {
+        guard clip.colorIndex != colorIndex else { return }
+        let previous = clip.colorIndex
+        clip.colorIndex = colorIndex
+        markDirty()
+        registerUndo("Recolour Clip") { $0.setClipColor(clip, colorIndex: previous) }
+    }
+
     /// DEL key / Track menu: delete the last-clicked clip.
     func deleteSelectedClip() {
         guard let slot = selectedSlot,
@@ -1020,7 +989,7 @@ final class TransportEngine {
         if selectedSlot == SlotRef(trackID: track.id, scene: scene) { selectedSlot = nil }
         if let state = playback[track.id],
            state.playingClipID == clip.id || state.queuedClipID == clip.id,
-           let channel = channels[track.id] {
+           let channel = graph.channel(for: track.id) {
             channel.pendingTask?.cancel()
             channel.stopAllPlayers()
             playback[track.id] = TrackPlayback()
@@ -1119,17 +1088,7 @@ final class TransportEngine {
         self.sceneCount = sceneCount
         self.masterVolume = masterVolume
         for track in newTracks {
-            let channel = TrackChannel()
-            audioEngine.attach(channel.mixer)
-            audioEngine.attach(channel.players[0])
-            audioEngine.attach(channel.players[1])
-            audioEngine.attach(channel.inputMixer)
-            audioEngine.connect(channel.players[0], to: channel.inputMixer, format: standardFormat)
-            audioEngine.connect(channel.players[1], to: channel.inputMixer, format: standardFormat)
-            audioEngine.connect(channel.inputMixer, to: channel.mixer, format: standardFormat)
-            audioEngine.connect(channel.mixer, to: audioEngine.mainMixerNode, format: nil)
-            channel.meter.install(on: channel.mixer)
-            channels[track.id] = channel
+            graph.addChannel(for: track.id)
             tracks.append(track)
         }
         selectedTrackID = tracks.first?.id
@@ -1191,7 +1150,7 @@ final class TransportEngine {
         else { return }
         // The device we were capturing from disappeared: keep what we have.
         stop()
-        recorder.removeTap(from: audioEngine.inputNode)
+        recorder.removeTap(from: graph.inputNode)
         inputConfigured = false
         statusMessage = "Input device disconnected — recording stopped."
     }
@@ -1199,15 +1158,10 @@ final class TransportEngine {
     // MARK: - Engine lifecycle
 
     private func startEngine() {
-        do {
-            try audioEngine.start()
-            engineError = nil
-        } catch {
-            engineError = "Audio engine failed to start: \(error.localizedDescription)"
-        }
+        engineError = graph.start()
     }
 
     private func ensureEngineRunning() {
-        if !audioEngine.isRunning { startEngine() }
+        graph.ensureRunning()
     }
 }

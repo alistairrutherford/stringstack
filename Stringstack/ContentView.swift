@@ -2,7 +2,6 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(TransportEngine.self) private var engine
-    @State private var deleteKeyMonitor: Any?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -14,16 +13,7 @@ struct ContentView: View {
                 .padding(.horizontal, 20)
                 .padding(.top, 14)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                // A click in the main content area releases keyboard focus,
-                // but only when a text field actually holds it — resigning on
-                // every click churns the responder chain and breaks later taps.
-                .simultaneousGesture(TapGesture().onEnded {
-                    DispatchQueue.main.async {
-                        guard let window = NSApp.keyWindow,
-                              window.firstResponder is NSTextView else { return }
-                        window.makeFirstResponder(nil)
-                    }
-                })
+                .resignsTextFieldFocusOnTap()
 
             ClipDetailBar()
                 .padding(.horizontal, 20)
@@ -46,7 +36,9 @@ struct ContentView: View {
         // Keyboard-focus rings on sliders/buttons read as phantom "track
         // selection" highlights — suppress focus visuals app-wide.
         .focusEffectDisabled()
-        .onAppear { installDeleteKeyMonitor() }
+        .onDeleteKey(isEnabled: { engine.selectedSlot != nil }) {
+            engine.deleteSelectedClip()
+        }
     }
 
     /// Fixed-height status strip: errors in coral, transient messages in
@@ -73,18 +65,5 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Theme.surface.opacity(0.8))
         )
-    }
-
-    /// DEL/⌦ deletes the selected clip — via an event monitor rather than a
-    /// bare menu key equivalent, so typing in text fields still works.
-    private func installDeleteKeyMonitor() {
-        guard deleteKeyMonitor == nil else { return }
-        deleteKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let isDeleteKey = event.keyCode == 51 || event.keyCode == 117
-            let editingText = NSApp.keyWindow?.firstResponder is NSTextView
-            guard isDeleteKey, !editingText, engine.selectedSlot != nil else { return event }
-            engine.deleteSelectedClip()
-            return nil
-        }
     }
 }

@@ -161,23 +161,27 @@ private struct SceneLaunchButton: View {
 private struct SceneStopButton: View {
     @Environment(TransportEngine.self) private var engine
     let scene: Int
-    @State private var flash = false
+    @State private var flashTrigger = 0
 
     var body: some View {
         Button {
             engine.selectScene(scene)
             engine.stop()
-            flash = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
-                withAnimation(.easeOut(duration: 0.35)) { flash = false }
-            }
+            flashTrigger += 1
         } label: {
             RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill(Color.white.opacity(flash ? 0.7 : 0))
-                .overlay(
+                .strokeBorder(Color.white.opacity(0.4), lineWidth: 1.5)
+                // Flash the square white on click, then fade out — driven by
+                // the trigger so there's no manual dispatch to reset it.
+                .background {
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.4), lineWidth: 1.5)
-                )
+                        .fill(Color.white)
+                        .phaseAnimator([0.0, 0.7, 0.0], trigger: flashTrigger) { fill, opacity in
+                            fill.opacity(opacity)
+                        } animation: { opacity in
+                            opacity == 0.7 ? .linear(duration: 0.02) : .easeOut(duration: 0.35)
+                        }
+                }
                 .frame(width: 15, height: 15)
                 .frame(width: GridMetrics.sceneStopWidth, height: GridMetrics.cellHeight)
                 .contentShape(Rectangle())
@@ -549,7 +553,7 @@ private struct FilledCell: View {
         .contextMenu {
             ForEach(0..<Theme.trackPalette.count, id: \.self) { index in
                 Button {
-                    clip.colorIndex = index
+                    engine.setClipColor(clip, colorIndex: index)
                 } label: {
                     Label(Theme.paletteNames[index],
                           systemImage: clip.colorIndex == index ? "checkmark.circle.fill" : "circle.fill")
