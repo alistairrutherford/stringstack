@@ -195,14 +195,15 @@ private struct SceneLaunchButton: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let scene: Int
 
-    private var isSelected: Bool { engine.selectedScene == scene }
+    private var isPlaying: Bool { engine.sceneIsPlaying(scene) }
 
     var body: some View {
         TimelineView(.animation(minimumInterval: nil,
-                                paused: reduceMotion || engine.mode == .stopped || !isSelected)) { _ in
+                                paused: reduceMotion || engine.mode == .stopped || !isPlaying)) { _ in
             let beats = engine.currentBeats
-            // Only the selected scene's launch button pulses with the beat.
-            let playing = !reduceMotion && isSelected && engine.mode != .stopped && beats >= 0
+            // The launch button pulses for the row whose clips are actually
+            // playing — not merely the selected row.
+            let playing = !reduceMotion && isPlaying && engine.mode != .stopped && beats >= 0
             // 1 at the start of each beat, decaying to 0 before the next.
             let pulse = playing ? pow(1 - (beats - beats.rounded(.down)), 2) : 0
 

@@ -377,6 +377,19 @@ final class TransportEngine {
         return tracks.contains { scene < $0.slots.count && $0.slots[scene] != nil }
     }
 
+    /// Whether any clip currently sounding lives in this scene row — i.e. the
+    /// row is actually playing. Drives the launch-button pulse, so it tracks the
+    /// audio rather than the selection (duplicating a scene mustn't move the
+    /// "playing" indicator off the row whose clips are still looping).
+    func sceneIsPlaying(_ scene: Int) -> Bool {
+        guard mode != .stopped, scene >= 0, scene < sceneCount else { return false }
+        return tracks.contains { track in
+            guard let playingID = playback[track.id]?.playingClipID,
+                  scene < track.slots.count else { return false }
+            return track.slots[scene]?.id == playingID
+        }
+    }
+
     /// Right-click a scene number: duplicate the whole row (all its clips)
     /// into a new scene inserted directly below.
     func duplicateScene(_ scene: Int) {

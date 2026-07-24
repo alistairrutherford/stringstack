@@ -40,6 +40,7 @@ struct ContentView: View {
             engine.deleteSelectedClip()
         }
         .onSessionLaunchKeys(engine)
+        .clearsInitialTextFocus()
     }
 
     /// Fixed-height status strip: errors in coral, transient messages in

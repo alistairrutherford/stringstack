@@ -5,7 +5,13 @@ import SwiftUI
 struct TransportBar: View {
     @Environment(TransportEngine.self) private var engine
     @State private var dragStartTempo: Double?
+    /// Editable text while the BPM field has focus; only applied to the engine
+    /// on Return (never live, never on focus loss).
+    @State private var tempoDraft = ""
     @FocusState private var tempoFieldFocused: Bool
+
+    /// The current tempo as the whole-number string the field displays.
+    private var tempoString: String { String(Int(engine.tempo)) }
 
     var body: some View {
         @Bindable var engine = engine
@@ -144,10 +150,7 @@ struct TransportBar: View {
             tempoStepButton("minus") { engine.tempo -= 1 }
 
             VStack(spacing: 0) {
-                TextField("", value: Binding(
-                    get: { engine.tempo },
-                    set: { engine.tempo = $0 }
-                ), format: .number.precision(.fractionLength(0)))
+                TextField("", text: $tempoDraft)
                     .textFieldStyle(.plain)
                     .multilineTextAlignment(.center)
                     .font(.system(size: 22, weight: .bold, design: .rounded))
@@ -155,12 +158,25 @@ struct TransportBar: View {
                     .foregroundStyle(Theme.cyan)
                     .frame(width: 54)
                     .focused($tempoFieldFocused)
-                    .onSubmit { tempoFieldFocused = false }
+                    .onSubmit(commitTempoDraft)
                     .onExitCommand { tempoFieldFocused = false }
                 Text("BPM")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(Theme.dimmed)
             }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            // Highlight the field while it's being edited, so it's clear the
+            // typed value isn't live until Return.
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Theme.cyan.opacity(0.12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(Theme.cyan, lineWidth: 1.5)
+                    )
+                    .opacity(tempoFieldFocused ? 1 : 0)
+            )
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 3)
@@ -170,6 +186,14 @@ struct TransportBar: View {
                     }
                     .onEnded { _ in dragStartTempo = nil }
             )
+            .onAppear { tempoDraft = tempoString }
+            // Seed the draft when editing begins; discard it (revert to the
+            // engine value) when focus leaves without a Return.
+            .onChange(of: tempoFieldFocused) { _, _ in tempoDraft = tempoString }
+            // Keep the display in step with −/+ and drag changes when not editing.
+            .onChange(of: engine.tempo) { _, _ in
+                if !tempoFieldFocused { tempoDraft = tempoString }
+            }
 
             tempoStepButton("plus") { engine.tempo += 1 }
         }
@@ -180,6 +204,15 @@ struct TransportBar: View {
         .help(engine.mode == .recording
               ? "Tempo is locked while recording"
               : "Type a BPM, use −/+, or drag the number up/down")
+    }
+
+    /// Applies the typed BPM on Return. Invalid input is ignored; the engine
+    /// clamps the value, and the focus-change handler re-syncs the display.
+    private func commitTempoDraft() {
+        if let value = Double(tempoDraft.trimmingCharacters(in: .whitespaces)) {
+            engine.tempo = value
+        }
+        tempoFieldFocused = false
     }
 
     private func tempoStepButton(_ symbol: String, action: @escaping () -> Void) -> some View {

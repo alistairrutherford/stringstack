@@ -23,6 +23,19 @@ extension View {
         modifier(LaunchKeyMonitor(engine: engine))
     }
 
+    /// Clears any text field that AppKit auto-focuses when the window first
+    /// appears (the BPM field, being the first text field, otherwise launches
+    /// in edit mode). Runs once, after the window has had a chance to become key.
+    func clearsInitialTextFocus() -> some View {
+        onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                guard let window = NSApp.keyWindow ?? NSApp.windows.first,
+                      window.firstResponder is NSTextView else { return }
+                window.makeFirstResponder(nil)
+            }
+        }
+    }
+
     /// Drops keyboard focus from an editing text field when the view is
     /// tapped — but only while a field is actually being edited, so it
     /// doesn't churn the responder chain on every click.
