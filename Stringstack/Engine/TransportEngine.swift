@@ -69,7 +69,9 @@ final class TransportEngine {
     /// Undo/redo for clip edits (⌘Z / ⇧⌘Z).
     @ObservationIgnored let undoManager = UndoManager()
 
-    let devices = DeviceManager()
+    /// Core Audio input devices; owned by the input controller and exposed
+    /// for the input picker UI.
+    var devices: DeviceManager { input.devices }
 
     var tempo: Double = 120 {
         didSet {
@@ -114,10 +116,10 @@ final class TransportEngine {
     @ObservationIgnored private let graph = AudioGraph()
     @ObservationIgnored private let metronome: MetronomeSource
     @ObservationIgnored private let recorder = RecordingService()
+    @ObservationIgnored private let input: AudioInputController
     @ObservationIgnored private var beat0Host: UInt64 = 0
     @ObservationIgnored private var recordTempo: Double = 120
     @ObservationIgnored private var recordStartBeat = 0.0
-    @ObservationIgnored private var inputConfigured = false
     @ObservationIgnored private var recordAutoStopTask: Task<Void, Never>?
     /// When recording an overdub, the existing clip being layered onto; its
     /// length also fixes the take length via `recordBarsOverride`.
@@ -143,6 +145,7 @@ final class TransportEngine {
 
     init() {
         metronome = MetronomeSource(sampleRate: graph.sampleRate)
+        input = AudioInputController(graph: graph, recorder: recorder)
 
         graph.attachSource(metronome.node)
         graph.setMasterVolume(masterVolume)
@@ -384,14 +387,17 @@ final class TransportEngine {
             return
         }
         guard mode != .recording else { return }
-        if inputConfigured {
+        if input.isConfigured {
             armOnly(track)
         } else {
             guard mode == .stopped else {
                 statusMessage = "Stop the transport before arming for the first time."
                 return
             }
-            Task { await configureInput(thenArm: track) }
+            Task {
+                let outcome = await input.configure()
+                applyConfigureOutcome(outcome, thenArm: track)
+            }
         }
     }
 
@@ -405,96 +411,37 @@ final class TransportEngine {
     func selectInputDevice(_ id: AudioDeviceID) {
         guard devices.selectedDeviceID != id else { return }
         devices.selectedDeviceID = id
-        guard inputConfigured else { return }
+        guard input.isConfigured else { return }
         if mode == .stopped {
-            Task { await configureInput() }
+            Task {
+                let outcome = await input.configure()
+                applyConfigureOutcome(outcome, thenArm: nil)
+            }
         } else {
-            inputConfigured = false
+            input.invalidate()
             statusMessage = "Input change applies once the transport stops — re-arm the track."
         }
     }
 
-    private func configureInput(thenArm track: Track? = nil) async {
-        guard await AVAudioApplication.requestRecordPermission() else {
-            engineError = "Microphone access denied — enable it in System Settings › Privacy & Security › Microphone."
-            return
-        }
-        inputDebugLog("=== configureInput; permission=\(AVAudioApplication.shared.recordPermission.rawValue) selected=\(devices.selectedDevice?.name ?? "nil") isDefault=\(devices.isSelectedDeviceSystemDefault)")
-
-        // Only touch the I/O unit's device when the user picked a
-        // non-default input; on macOS input/output can share one HAL unit
-        // and re-pointing it at a mic device can fail output init (-10875).
-        let needsExplicitDevice = !devices.isSelectedDeviceSystemDefault
-        do {
-            try restartEngineWithInput(setDevice: needsExplicitDevice)
-            inputConfigured = true
+    /// Translates the input controller's bring-up outcome into UI state and
+    /// arms the requested track on success.
+    private func applyConfigureOutcome(_ outcome: AudioInputController.ConfigureOutcome,
+                                       thenArm track: Track?) {
+        switch outcome {
+        case .success:
             engineError = nil
             statusMessage = nil
             if let track { armOnly(track) }
-            inputDebugLog("configureInput OK (explicitDevice=\(needsExplicitDevice))")
-        } catch {
-            inputDebugLog("attempt 1 failed: \(error)")
-            // Retry without touching the device at all — the engine then
-            // captures from the system default input.
-            do {
-                try restartEngineWithInput(setDevice: false)
-                devices.markSelectionAsSystemDefault()
-                inputConfigured = true
-                engineError = nil
-                statusMessage = "Using the system default input device."
-                if let track { armOnly(track) }
-                inputDebugLog("attempt 2 (no device set) OK")
-            } catch {
-                inputDebugLog("attempt 2 failed: \(error)")
-                recorder.removeTap(from: graph.inputNode)
-                inputConfigured = false
-                engineError = "Could not configure input: \(error.localizedDescription) — if this app was rebuilt recently, macOS may hold a stale microphone grant; run `tccutil reset Microphone com.example.Stringstack` in Terminal and try again."
-                startEngine()
-            }
-        }
-    }
-
-    /// Full input bring-up. Ordering matters: reset tears down the previous
-    /// render state so a device change takes; prepare initialises I/O so
-    /// the input bus reports real formats; the tap must be in place before
-    /// start so the input unit comes up connected.
-    private func restartEngineWithInput(setDevice: Bool) throws {
-        let input = graph.inputNode
-        graph.stop()
-        recorder.removeTap(from: input)
-        graph.reset()
-        if setDevice {
-            try devices.applySelectedDevice(to: input)
-        }
-        graph.prepare()
-
-        let hardware = input.inputFormat(forBus: 0)
-        let bus = input.outputFormat(forBus: 0)
-        inputDebugLog("bring-up setDevice=\(setDevice) sharedIOUnit=\(graph.sharesIOUnit) hw=\(Int(hardware.sampleRate))Hz/\(hardware.channelCount)ch bus=\(Int(bus.sampleRate))Hz/\(bus.channelCount)ch")
-
-        guard hardware.sampleRate > 0, hardware.channelCount > 0 else {
-            throw NSError(domain: "Stringstack", code: 4, userInfo: [
-                NSLocalizedDescriptionKey: "Input device reports no usable channels (\(Int(hardware.sampleRate)) Hz, \(hardware.channelCount) ch)",
-            ])
-        }
-        recorder.installTap(on: input)
-        try graph.startThrowing()
-    }
-
-    /// Appends a line to Application Support/input-debug.log so input
-    /// bring-up failures can be diagnosed after the fact.
-    private func inputDebugLog(_ line: String) {
-        guard let directory = try? FileManager.default.url(
-            for: .applicationSupportDirectory, in: .userDomainMask,
-            appropriateFor: nil, create: true) else { return }
-        let url = directory.appendingPathComponent("input-debug.log")
-        let stamped = "\(Date().formatted(date: .omitted, time: .standard)) \(line)\n"
-        if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
-            handle.write(Data(stamped.utf8))
-            try? handle.close()
-        } else {
-            try? Data(stamped.utf8).write(to: url)
+        case .successUsingDefault:
+            engineError = nil
+            statusMessage = "Using the system default input device."
+            if let track { armOnly(track) }
+        case .permissionDenied:
+            engineError = "Microphone access denied — enable it in System Settings › Privacy & Security › Microphone."
+        case .failed(let message):
+            // Bring the base (output-only) engine back, then surface the error.
+            startEngine()
+            engineError = message
         }
     }
 
@@ -820,15 +767,12 @@ final class TransportEngine {
     }
 
     private func startRecordingFromStopped(_ track: Track, scene: Int) async {
-        guard await AVAudioApplication.requestRecordPermission() else {
-            engineError = "Microphone access denied — enable it in System Settings › Privacy & Security › Microphone."
-            return
-        }
         guard mode == .stopped, recordingSlot == nil else { return }
 
-        if !inputConfigured {
-            await configureInput()
-            guard inputConfigured else { return }
+        if !input.isConfigured {
+            let outcome = await input.configure()
+            applyConfigureOutcome(outcome, thenArm: nil)
+            guard input.isConfigured else { return }
         }
         ensureEngineRunning()
         recorder.beginCapture()
@@ -854,7 +798,7 @@ final class TransportEngine {
     }
 
     private func startRecordingWhileRolling(_ track: Track, scene: Int) {
-        guard inputConfigured else {
+        guard input.isConfigured else {
             statusMessage = "Stop the transport and re-arm the track to set up the input first."
             return
         }
@@ -1150,8 +1094,7 @@ final class TransportEngine {
         else { return }
         // The device we were capturing from disappeared: keep what we have.
         stop()
-        recorder.removeTap(from: graph.inputNode)
-        inputConfigured = false
+        input.teardown()
         statusMessage = "Input device disconnected — recording stopped."
     }
 
