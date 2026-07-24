@@ -48,10 +48,10 @@ The first time you record, macOS will ask for **microphone permission** — appr
 From top to bottom:
 
 1. **Transport bar** — play/stop/record, position readout with beat dots, tempo, time signature, count-in, record length, quantise, and metronome controls.
-2. **Clip grid** — the scene launch/stop column plus one column per track.
+2. **Clip grid** — a numbered scene launch/stop column plus one column per track. Each track header is a mini channel strip (arm, mute, solo, overdub mode, volume, pan knob, and a stereo VU meter).
 3. **Clip inspector** — the selected clip's waveform with a bar/beat grid and a follow line that tracks playback.
 4. **FX chain bar** — the selected track's Audio Unit effect chain.
-5. **Input bar** — the recording input device picker and live input level meter.
+5. **Input bar** — the recording input device picker, a live input meter with an input-level slider, and the master output meter + fader.
 6. **Status bar** — messages, errors, and a shortcut hint.
 
 ### Selection cues
@@ -91,8 +91,17 @@ Each track column has a header with:
   - **o** (Overdub) — the existing clip plays and your new take is layered on top, keeping the same length.
   - **r** (Replace) — the existing clip is cleared and re-recorded from scratch.
 - **Volume** slider and a rotary **Pan** knob (drag to turn, double-click to re-centre).
+- **Stereo VU meter** — post-fader, so the volume slider controls it and it reflects the pan knob.
 
 Add a track with the **+ TRACK** button; add a scene row with the **+** under the scene column.
+
+### Scenes
+
+Scene rows are numbered consecutively (1, 2, 3…) down the left, and the numbers stay consecutive after any duplicate, delete, or reorder.
+
+- **Reorder** — drag a scene number up or down; the whole row (all tracks) moves with it.
+- **Right-click a scene number** — Duplicate Scene (copies the whole row into a new scene below) or Delete Scene. Both are undoable.
+- The grid can be emptied of scenes entirely and rebuilt with **+**.
 
 ---
 
@@ -116,8 +125,9 @@ Recording into an occupied cell uses that track's **o / r** mode (overdub or rep
 - **Launch a scene** — click the ▶ in the scene column to fire that whole row. The main Play button also launches the currently selected scene, and the selected scene's ▶ pulses with the beat.
 - **Stop** — each scene row has a clear (outlined) **■ square** to the right of its ▶ that flashes when clicked and stops everything, exactly like the main Stop button. You can also stop a single track's clip by clicking an empty cell on that track while it plays.
 - **Move a clip** — drag it to another cell (clips swap).
+- **Duplicate a clip** — `⌘D` (or right-click ▸ Duplicate) copies the clip into the scene below, inserting a scene if needed.
 - **Import audio** — drag an audio file from Finder onto a cell.
-- **Recolour / delete** — right-click a clip.
+- **Rename / recolour / delete** — right-click a clip.
 
 ---
 
@@ -143,7 +153,9 @@ Projects are saved as self-contained **`.stringstackproj`** bundles (a folder ho
 - **Save** — `⌘S` (Save As — `⇧⌘S`)
 - **Load Demo Set** — from the File menu
 
-The current project **autosaves** every couple of minutes once it has been saved at least once.
+The current project **autosaves** every couple of minutes once it has been saved at least once, and the **last-opened project reopens automatically** the next time you launch the app.
+
+Input gain, metronome on/off, and metronome volume are remembered as app preferences across launches (they aren't stored per-project).
 
 ---
 
@@ -158,6 +170,7 @@ The current project **autosaves** every couple of minutes once it has been saved
 | Save | `⌘S` |
 | Save As | `⇧⌘S` |
 | Undo / Redo | `⌘Z` / `⇧⌘Z` |
+| Duplicate selected clip | `⌘D` |
 | Delete selected clip | `Delete` (or `⌘⌫`) |
 | Arm selected track | `⌥A` |
 | Mute selected track | `⌥M` |
@@ -171,6 +184,23 @@ The current project **autosaves** every couple of minutes once it has been saved
 - **No time-stretching** — clips play back at the tempo they were recorded at. Changing the tempo afterwards will make existing clips drift against the grid.
 - **One input at a time** — a single track is armed for recording, matching the single audio input.
 - Switching the input device takes effect the next time recording starts from a stopped transport.
+
+---
+
+## Development
+
+Run the unit tests from Xcode (⌘U) or the command line:
+
+```bash
+xcodebuild test -project Stringstack.xcodeproj -scheme Stringstack -destination 'platform=macOS'
+```
+
+The `StringstackTests` target covers the pure, engine-independent logic — the
+transport/beat maths (`BeatMath`: launch quantisation, recorded-bar rounding,
+scene-reorder index mapping), host-time conversions (`HostClock`), buffer
+maths (`AudioUtil` mix/slice/convert and `Waveform` peaks), and the
+`.stringstackproj` Codable schema round-trip. This logic is deliberately
+separated from the audio engine so the tests run fast and headless.
 
 ---
 

@@ -18,6 +18,8 @@ struct InputBar: View {
             }
             divider
             hint
+            divider
+            MasterSection()
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
@@ -79,6 +81,68 @@ struct InputBar: View {
             .foregroundStyle(Theme.dimmed)
             .lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Master output: a stereo meter over the master volume fader.
+private struct MasterSection: View {
+    @Environment(TransportEngine.self) private var engine
+    @State private var dragStart: Double?
+
+    var body: some View {
+        @Bindable var engine = engine
+        HStack(spacing: 8) {
+            Image(systemName: "speaker.wave.3.fill")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(Theme.mint)
+            VStack(alignment: .leading, spacing: 5) {
+                MasterMeter()
+                Slider(value: $engine.masterVolume, in: 0...1, onEditingChanged: { editing in
+                    if editing {
+                        dragStart = engine.masterVolume
+                    } else if let start = dragStart {
+                        engine.commitMasterVolume(from: start)
+                        dragStart = nil
+                    }
+                })
+                    .controlSize(.mini)
+                    .frame(width: 120)
+                    .tint(Theme.mint)
+                    .help("Master output volume")
+            }
+        }
+        .help("Master output")
+    }
+}
+
+/// Stereo master output meter, polled from the master mixer tap.
+private struct MasterMeter: View {
+    @Environment(TransportEngine.self) private var engine
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: nil, paused: engine.mode == .stopped)) { _ in
+            let levels = engine.mode == .stopped ? (left: 0.0, right: 0.0) : engine.masterMeter.levels
+            VStack(spacing: 2) {
+                bar(level: levels.left)
+                bar(level: levels.right)
+            }
+        }
+        .frame(width: 120, height: 8)
+    }
+
+    private func bar(level: Double) -> some View {
+        let fraction = min(1, pow(level, 0.5))
+        return GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Theme.surfaceRaised)
+                Capsule()
+                    .fill(LinearGradient(colors: [Theme.mint, Theme.amber, Theme.coral],
+                                         startPoint: .leading, endPoint: .trailing))
+                    .frame(width: max(0, proxy.size.width * fraction))
+            }
+            .clipShape(Capsule())
+        }
+        .frame(height: 3)
     }
 }
 

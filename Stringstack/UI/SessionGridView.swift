@@ -78,7 +78,7 @@ struct SessionGridView: View {
             }
             .frame(height: GridMetrics.headerHeight)
 
-            ForEach(0..<engine.sceneCount, id: \.self) { scene in
+            ForEach(Array(engine.scenes.enumerated()), id: \.element.id) { scene, _ in
                 SceneRow(scene: scene)
             }
 
@@ -192,16 +192,17 @@ private struct SceneRow: View {
 /// like Ableton's animated launch buttons.
 private struct SceneLaunchButton: View {
     @Environment(TransportEngine.self) private var engine
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let scene: Int
 
     private var isSelected: Bool { engine.selectedScene == scene }
 
     var body: some View {
         TimelineView(.animation(minimumInterval: nil,
-                                paused: engine.mode == .stopped || !isSelected)) { _ in
+                                paused: reduceMotion || engine.mode == .stopped || !isSelected)) { _ in
             let beats = engine.currentBeats
             // Only the selected scene's launch button pulses with the beat.
-            let playing = isSelected && engine.mode != .stopped && beats >= 0
+            let playing = !reduceMotion && isSelected && engine.mode != .stopped && beats >= 0
             // 1 at the start of each beat, decaying to 0 before the next.
             let pulse = playing ? pow(1 - (beats - beats.rounded(.down)), 2) : 0
 
@@ -232,6 +233,7 @@ private struct SceneLaunchButton: View {
 /// and triggers the same full stop as the main transport button.
 private struct SceneStopButton: View {
     @Environment(TransportEngine.self) private var engine
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let scene: Int
     @State private var flashTrigger = 0
 
@@ -239,7 +241,7 @@ private struct SceneStopButton: View {
         Button {
             engine.selectScene(scene)
             engine.stop()
-            flashTrigger += 1
+            if !reduceMotion { flashTrigger += 1 }
         } label: {
             RoundedRectangle(cornerRadius: 4, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.4), lineWidth: 1.5)
@@ -317,7 +319,7 @@ private struct TrackColumn: View {
 
         VStack(spacing: GridMetrics.spacing) {
             TrackHeader(track: track)
-            ForEach(0..<engine.sceneCount, id: \.self) { scene in
+            ForEach(Array(engine.scenes.enumerated()), id: \.element.id) { scene, _ in
                 ClipCell(track: track, scene: scene)
             }
         }
@@ -343,17 +345,16 @@ private struct TrackHeader: View {
     @Environment(TransportEngine.self) private var engine
     let track: Track
 
+    @State private var volumeDragStart: Double?
+    @State private var isEditingName = false
+    @State private var nameDraft = ""
+    @FocusState private var nameFieldFocused: Bool
+
     private var color: Color { Theme.trackPalette[track.colorIndex % Theme.trackPalette.count] }
 
     var body: some View {
         VStack(spacing: 6) {
-            Text(track.name)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.white.opacity(0.9))
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .help("\(track.name) — click to select this track. Right-click to delete it.")
+            trackTitle
 
             HStack(spacing: 6) {
                 headerButton("record.circle", active: track.isArmed, color: Theme.coral) {
@@ -381,13 +382,20 @@ private struct TrackHeader: View {
                 sliderRow("VOL", value: Binding(
                     get: { track.volume },
                     set: { engine.setVolume(track, $0) }
-                ), range: 0...1)
+                ), range: 0...1, onEditingChanged: { editing in
+                    if editing {
+                        volumeDragStart = track.volume
+                    } else if let start = volumeDragStart {
+                        engine.commitVolume(track, from: start)
+                        volumeDragStart = nil
+                    }
+                })
                 .help("Track volume")
 
                 PanKnob(color: color, pan: Binding(
                     get: { track.pan },
                     set: { engine.setPan(track, $0) }
-                ))
+                ), onCommit: { previous in engine.commitPan(track, from: previous) })
             }
 
             TrackMeter(track: track)
@@ -405,8 +413,53 @@ private struct TrackHeader: View {
         .contentShape(Rectangle())
         .onTapGesture { engine.selectTrack(track) }
         .contextMenu {
+            Button("Rename…") { beginRenaming() }
             Button("Delete Track", role: .destructive) { engine.deleteTrack(track) }
         }
+    }
+
+    /// The track name — click to rename it inline. Editing commits on Return or
+    /// when focus leaves; a blank name is rejected (the old name is kept).
+    @ViewBuilder
+    private var trackTitle: some View {
+        if isEditingName {
+            TextField("Track name", text: $nameDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .focused($nameFieldFocused)
+                .onSubmit(commitRename)
+                .onChange(of: nameFieldFocused) { _, focused in
+                    if !focused { commitRename() }
+                }
+        } else {
+            Text(track.name)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.white.opacity(0.9))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { beginRenaming() }
+                .onTapGesture { engine.selectTrack(track) }
+                .help("\(track.name) — click to select, double-click to rename. Right-click to delete this track.")
+        }
+    }
+
+    private func beginRenaming() {
+        engine.selectTrack(track)
+        nameDraft = track.name
+        isEditingName = true
+        nameFieldFocused = true
+    }
+
+    /// Applies the edited name (the engine rejects blank/unchanged names) and
+    /// leaves edit mode.
+    private func commitRename() {
+        guard isEditingName else { return }
+        isEditingName = false
+        engine.renameTrack(track, to: nameDraft)
     }
 
     /// Record-mode toggle for recording into an occupied cell, styled like
@@ -438,13 +491,14 @@ private struct TrackHeader: View {
     }
 
     private func sliderRow(_ label: String, value: Binding<Double>,
-                           range: ClosedRange<Double>) -> some View {
+                           range: ClosedRange<Double>,
+                           onEditingChanged: @escaping (Bool) -> Void = { _ in }) -> some View {
         HStack(spacing: 5) {
             Text(label)
                 .font(.system(size: 7, weight: .heavy))
                 .foregroundStyle(Theme.dimmed)
                 .frame(width: 20, alignment: .leading)
-            Slider(value: value, in: range)
+            Slider(value: value, in: range, onEditingChanged: onEditingChanged)
                 .controlSize(.mini)
                 .tint(color)
                 .focusable(false)
@@ -457,6 +511,9 @@ private struct TrackHeader: View {
 private struct PanKnob: View {
     let color: Color
     @Binding var pan: Double
+    /// Called on gesture end with the pre-gesture value, so the change can be
+    /// registered as a single undo.
+    var onCommit: (Double) -> Void = { _ in }
     @State private var dragStart: Double?
 
     private let sweep = 135.0
@@ -502,9 +559,16 @@ private struct PanKnob: View {
                     let next = (dragStart ?? 0) - Double(value.translation.height) * 0.012
                     pan = min(max(next, -1), 1)
                 }
-                .onEnded { _ in dragStart = nil }
+                .onEnded { _ in
+                    if let start = dragStart { onCommit(start) }
+                    dragStart = nil
+                }
         )
-        .onTapGesture(count: 2) { pan = 0 }
+        .onTapGesture(count: 2) {
+            let previous = pan
+            pan = 0
+            onCommit(previous)
+        }
         .help("Pan — drag to turn · double-click to centre")
     }
 }
@@ -655,6 +719,8 @@ private struct FilledCell: View {
     let track: Track
     let scene: Int
     let isRecordingHere: Bool
+    @State private var isRenaming = false
+    @State private var renameDraft = ""
 
     private var color: Color { Theme.trackPalette[clip.colorIndex % Theme.trackPalette.count] }
     private var state: TrackPlayback? { engine.playback[track.id] }
@@ -669,6 +735,10 @@ private struct FilledCell: View {
             NSItemProvider(object: "clipmove:\(track.id.uuidString):\(scene)" as NSString)
         }
         .contextMenu {
+            Button("Rename…") {
+                renameDraft = clip.name
+                isRenaming = true
+            }
             Button("Duplicate") {
                 engine.duplicateClipDown(clip, on: track, scene: scene)
             }
@@ -688,6 +758,11 @@ private struct FilledCell: View {
             Button("Delete Clip", role: .destructive) {
                 engine.deleteClip(on: track, scene: scene)
             }
+        }
+        .alert("Rename Clip", isPresented: $isRenaming) {
+            TextField("Name", text: $renameDraft)
+            Button("Rename") { engine.renameClip(clip, to: renameDraft) }
+            Button("Cancel", role: .cancel) { }
         }
     }
 

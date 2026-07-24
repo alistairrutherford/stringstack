@@ -21,9 +21,17 @@ final class TransportEngine {
         case recording
     }
 
-    private(set) var mode: Mode = .stopped
+    // The following four are settable within the module (not `private(set)`) so
+    // `ClipLauncher` / `RecordingController` can drive them; the UI only reads
+    // them. `@Observable` still tracks them regardless of setter access.
+    var mode: Mode = .stopped
     private(set) var tracks: [Track] = []
-    private(set) var sceneCount = 4
+    /// Scene rows, in top-to-bottom order. Each carries only a stable id; the
+    /// clips themselves live positionally in each track's `slots` array, keyed
+    /// by row index. Kept exactly in lockstep with every track's slot count.
+    private(set) var scenes: [SessionScene] = (0..<4).map { _ in SessionScene() }
+    /// Number of scene rows — derived from `scenes`, the single source of truth.
+    var sceneCount: Int { scenes.count }
     /// Track whose device chain is shown in the FX bar.
     var selectedTrackID: UUID?
 
@@ -32,11 +40,11 @@ final class TransportEngine {
     }
 
     /// Per-track playing/queued state for the grid UI.
-    private(set) var playback: [UUID: TrackPlayback] = [:]
+    var playback: [UUID: TrackPlayback] = [:]
     /// The slot currently being recorded into, if any.
-    private(set) var recordingSlot: SlotRef?
+    var recordingSlot: SlotRef?
     /// Non-nil while a rolling-transport recording waits for its bar boundary.
-    private(set) var recordQueuedUntilBeat: Double?
+    var recordQueuedUntilBeat: Double?
     /// Last-clicked clip slot; DEL deletes it.
     var selectedSlot: SlotRef?
     /// Last-clicked scene row, outlined in the grid.
@@ -95,16 +103,46 @@ final class TransportEngine {
     }
 
     var metronomeEnabled = true {
-        didSet { metronome.setClickAudible(metronomeEnabled) }
+        didSet {
+            metronome.setClickAudible(metronomeEnabled)
+            UserDefaults.standard.set(metronomeEnabled, forKey: Prefs.metronomeEnabled)
+        }
     }
 
     var metronomeVolume = 0.7 {
-        didSet { metronome.setVolume(metronomeVolume) }
+        didSet {
+            metronome.setVolume(metronomeVolume)
+            UserDefaults.standard.set(metronomeVolume, forKey: Prefs.metronomeVolume)
+        }
     }
 
     /// Input gain applied to recorded audio (and the input meter). 1 = unity.
     var inputGain = 1.0 {
-        didSet { recorder.setInputGain(inputGain) }
+        didSet {
+            recorder.setInputGain(inputGain)
+            UserDefaults.standard.set(inputGain, forKey: Prefs.inputGain)
+        }
+    }
+
+    /// Preference keys for setup-level settings that persist across launches.
+    private enum Prefs {
+        static let metronomeEnabled = "metronomeEnabled"
+        static let metronomeVolume = "metronomeVolume"
+        static let inputGain = "inputGain"
+    }
+
+    /// Restores setup preferences; each assignment re-applies via its didSet.
+    private func loadPreferences() {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: Prefs.metronomeEnabled) != nil {
+            metronomeEnabled = defaults.bool(forKey: Prefs.metronomeEnabled)
+        }
+        if defaults.object(forKey: Prefs.metronomeVolume) != nil {
+            metronomeVolume = defaults.double(forKey: Prefs.metronomeVolume)
+        }
+        if defaults.object(forKey: Prefs.inputGain) != nil {
+            inputGain = defaults.double(forKey: Prefs.inputGain)
+        }
     }
 
     var masterVolume = 0.9 {
@@ -114,24 +152,23 @@ final class TransportEngine {
         }
     }
 
-    /// Total count-in beats of the transport run currently in progress.
-    @ObservationIgnored private(set) var activeCountInBeats = 0
+    /// Total count-in beats of the transport run currently in progress. Set by
+    /// `RecordingController`, read by the transport bar's beat readout.
+    @ObservationIgnored var activeCountInBeats = 0
 
     /// The AVAudioEngine node graph (channels, mixing, effects, lifecycle).
-    @ObservationIgnored private let graph = AudioGraph()
-    @ObservationIgnored private let metronome: MetronomeSource
-    @ObservationIgnored private let recorder = RecordingService()
-    @ObservationIgnored private let input: AudioInputController
-    @ObservationIgnored private var beat0Host: UInt64 = 0
-    @ObservationIgnored private var recordTempo: Double = 120
-    @ObservationIgnored private var recordStartBeat = 0.0
-    @ObservationIgnored private var recordAutoStopTask: Task<Void, Never>?
-    /// When recording an overdub, the existing clip being layered onto; its
-    /// length also fixes the take length via `recordBarsOverride`.
-    @ObservationIgnored private var overdubSource: Clip?
-    @ObservationIgnored private var recordBarsOverride: Int?
-    /// A Replace-mode take that must clear its slot once recording begins.
-    @ObservationIgnored private var replaceClearPending = false
+    /// `internal` (not `private`) so the extracted `ClipLauncher` /
+    /// `RecordingController` can reach the shared audio nodes.
+    @ObservationIgnored let graph = AudioGraph()
+    @ObservationIgnored let metronome: MetronomeSource
+    @ObservationIgnored let recorder = RecordingService()
+    @ObservationIgnored let input: AudioInputController
+
+    /// Clip launch/stop scheduling, and audio capture into cells — split out of
+    /// this god-object into focused controllers that drive the engine's
+    /// observed state through an `unowned` back-reference.
+    @ObservationIgnored private(set) lazy var launcher = ClipLauncher(engine: self)
+    @ObservationIgnored private(set) lazy var recording = RecordingController(engine: self)
 
     /// Standard clip format — the graph normalises every buffer to it.
     var standardFormat: AVAudioFormat { graph.standardFormat }
@@ -165,11 +202,20 @@ final class TransportEngine {
             self?.handleDeviceListChange()
         }
 
-        if !UserDefaults.standard.bool(forKey: "didInstallDemoSet") {
+        loadPreferences()
+
+        // Reopen the last project if one is remembered; otherwise install the
+        // demo set on first launch.
+        if let url = ProjectStore.resolveLastProject(), (try? ProjectStore.read(into: self, from: url)) != nil {
+            projectURL = url
+            statusMessage = "Reopened \(url.lastPathComponent)"
+        } else if !UserDefaults.standard.bool(forKey: "didInstallDemoSet") {
             UserDefaults.standard.set(true, forKey: "didInstallDemoSet")
             DemoFactory.install(into: self)
         }
-        // A fresh launch (incl. the demo set) is not an unsaved user edit.
+        // A fresh launch (incl. the demo set / reopened project) is not an
+        // unsaved user edit, and its setup shouldn't populate the undo stack.
+        undoManager.removeAllActions()
         hasUnsavedChanges = false
 
         // Autosave every two minutes once the project has a home, while idle.
@@ -219,10 +265,13 @@ final class TransportEngine {
         tracks.append(track)
         applyMix(track)
         markDirty()
+        registerUndo("Add Track") { $0.deleteTrack(track) }
     }
 
     func deleteTrack(_ track: Track) {
+        guard let index = tracks.firstIndex(where: { $0.id == track.id }) else { return }
         if recordingSlot?.trackID == track.id { stop() }
+        let savedEffects = track.effects
         for effect in track.effects {
             PluginWindows.close(effect.id)
             graph.detachEffect(effect.node)
@@ -235,10 +284,25 @@ final class TransportEngine {
         if selectedSlot?.trackID == track.id { selectedSlot = nil }
         applyMixAll()
         markDirty()
+        registerUndo("Delete Track") { $0.restoreTrack(track, at: index, effects: savedEffects) }
+    }
+
+    /// Undo of `deleteTrack`: re-create the channel, re-attach the same
+    /// effect nodes and rewire the chain, and re-insert the track.
+    private func restoreTrack(_ track: Track, at index: Int, effects: [EffectInstance]) {
+        graph.addChannel(for: track.id)
+        track.effects = effects
+        for effect in effects { graph.attachEffect(effect.node) }
+        graph.rebuildChain(for: track.id, effects: track.effects)
+        tracks.insert(track, at: min(index, tracks.count))
+        applyMix(track)
+        selectTrack(track)
+        markDirty()
+        registerUndo("Delete Track") { $0.deleteTrack(track) }
     }
 
     func addScene() {
-        sceneCount += 1
+        scenes.append(SessionScene())
         for track in tracks { track.slots.append(nil) }
         markDirty()
     }
@@ -249,7 +313,7 @@ final class TransportEngine {
     func insertScene(at index: Int) {
         let clamped = max(0, min(index, sceneCount))
         for track in tracks { track.slots.insert(nil, at: clamped) }
-        sceneCount += 1
+        scenes.insert(SessionScene(), at: clamped)
         if let scene = selectedScene, scene >= clamped { selectedScene = scene + 1 }
         if let slot = selectedSlot, slot.scene >= clamped {
             selectedSlot = SlotRef(trackID: slot.trackID, scene: slot.scene + 1)
@@ -269,6 +333,8 @@ final class TransportEngine {
             let moved = track.slots.remove(at: source)
             track.slots.insert(moved, at: destination)
         }
+        let movedScene = scenes.remove(at: source)
+        scenes.insert(movedScene, at: destination)
         selectedScene = remapSceneIndex(selectedScene, from: source, to: destination)
         if let slot = selectedSlot {
             selectedSlot = SlotRef(trackID: slot.trackID,
@@ -285,10 +351,7 @@ final class TransportEngine {
     /// Where a row index ends up after moving `source` to `destination`.
     private func remapSceneIndex(_ index: Int?, from source: Int, to destination: Int) -> Int? {
         guard let index else { return nil }
-        if index == source { return destination }
-        if source < destination, index > source, index <= destination { return index - 1 }
-        if source > destination, index >= destination, index < source { return index + 1 }
-        return index
+        return BeatMath.sceneIndexAfterMove(index, from: source, to: destination)
     }
 
     /// Whether a scene row holds at least one clip (drives the enabled state
@@ -355,7 +418,7 @@ final class TransportEngine {
             }
             track.slots.remove(at: index)
         }
-        sceneCount -= 1
+        scenes.remove(at: index)
         if let scene = selectedScene {
             if scene > index { selectedScene = scene - 1 }
             else if scene == index { selectedScene = sceneCount > 0 ? min(index, sceneCount - 1) : nil }
@@ -377,6 +440,17 @@ final class TransportEngine {
         }
     }
 
+    /// Rename a track (undoable). Blank names are rejected — a track keeps its
+    /// current name if the new one is empty or only whitespace.
+    func renameTrack(_ track: Track, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != track.name else { return }
+        let previous = track.name
+        track.name = trimmed
+        markDirty()
+        registerUndo("Rename Track") { $0.renameTrack(track, to: previous) }
+    }
+
     func selectScene(_ scene: Int) {
         guard scene >= 0, scene < sceneCount else { return }
         selectedScene = scene
@@ -384,6 +458,8 @@ final class TransportEngine {
 
     // MARK: - Mixing
 
+    /// Continuous — applied live during a slider/knob drag; undo is registered
+    /// once per gesture via `commitVolume`/`commitPan`.
     func setVolume(_ track: Track, _ volume: Double) {
         selectTrack(track)
         track.volume = volume
@@ -398,22 +474,72 @@ final class TransportEngine {
         markDirty()
     }
 
+    /// Registers a single undo for a completed volume drag (from `previous`
+    /// to the current value).
+    func commitVolume(_ track: Track, from previous: Double) {
+        let current = track.volume
+        guard previous != current else { return }
+        registerUndo("Track Volume") { $0.applyVolume(track, to: previous, undoTo: current) }
+    }
+
+    func commitPan(_ track: Track, from previous: Double) {
+        let current = track.pan
+        guard previous != current else { return }
+        registerUndo("Track Pan") { $0.applyPan(track, to: previous, undoTo: current) }
+    }
+
+    private func applyVolume(_ track: Track, to value: Double, undoTo other: Double) {
+        track.volume = value
+        applyMix(track)
+        markDirty()
+        registerUndo("Track Volume") { $0.applyVolume(track, to: other, undoTo: value) }
+    }
+
+    private func applyPan(_ track: Track, to value: Double, undoTo other: Double) {
+        track.pan = value
+        applyMix(track)
+        markDirty()
+        registerUndo("Track Pan") { $0.applyPan(track, to: other, undoTo: value) }
+    }
+
+    func commitMasterVolume(from previous: Double) {
+        let current = masterVolume
+        guard previous != current else { return }
+        registerUndo("Master Volume") { $0.applyMasterVolume(to: previous, undoTo: current) }
+    }
+
+    private func applyMasterVolume(to value: Double, undoTo other: Double) {
+        masterVolume = value  // didSet applies to the graph and marks dirty
+        registerUndo("Master Volume") { $0.applyMasterVolume(to: other, undoTo: value) }
+    }
+
     func toggleMute(_ track: Track) {
         selectTrack(track)
         track.isMuted.toggle()
         applyMixAll()
         markDirty()
+        registerUndo("Mute Track") { $0.toggleMute(track) }
     }
 
     /// Exclusive solo: soloing a track silences every other track, so only
     /// this one plays. Clicking an already-soloed track clears solo.
     func toggleSolo(_ track: Track) {
         selectTrack(track)
+        let previous = tracks.map { ($0.id, $0.isSoloed) }
         let willSolo = !track.isSoloed
         for other in tracks { other.isSoloed = false }
         track.isSoloed = willSolo
         applyMixAll()
         markDirty()
+        registerUndo("Solo Track") { $0.restoreSolo(previous) }
+    }
+
+    private func restoreSolo(_ state: [(UUID, Bool)]) {
+        let current = tracks.map { ($0.id, $0.isSoloed) }
+        for (id, soloed) in state { tracks.first { $0.id == id }?.isSoloed = soloed }
+        applyMixAll()
+        markDirty()
+        registerUndo("Solo Track") { $0.restoreSolo(current) }
     }
 
     /// Record-into-occupied-clip mode: overdub (layer) when on, replace when off.
@@ -421,6 +547,7 @@ final class TransportEngine {
         selectTrack(track)
         track.isOverdub.toggle()
         markDirty()
+        registerUndo("Record Mode") { $0.toggleOverdub(track) }
     }
 
     func meterLevels(for track: Track) -> (left: Double, right: Double) {
@@ -555,7 +682,7 @@ final class TransportEngine {
 
     /// Translates the input controller's bring-up outcome into UI state and
     /// arms the requested track on success.
-    private func applyConfigureOutcome(_ outcome: AudioInputController.ConfigureOutcome,
+    func applyConfigureOutcome(_ outcome: AudioInputController.ConfigureOutcome,
                                        thenArm track: Track?) {
         switch outcome {
         case .success:
@@ -598,17 +725,7 @@ final class TransportEngine {
 
     /// Global stop: finish any recording, stop all clips and the clock.
     func stop() {
-        recordAutoStopTask?.cancel()
-        recordAutoStopTask = nil
-        metronome.setClickSuppressed(false)
-        if recordingSlot != nil {
-            captureRecordedClip()
-            recordingSlot = nil
-            recordQueuedUntilBeat = nil
-        }
-        overdubSource = nil
-        recordBarsOverride = nil
-        replaceClearPending = false
+        recording.handleTransportStop()
         for channel in graph.channels.values {
             channel.pendingTask?.cancel()
             channel.pendingTask = nil
@@ -620,8 +737,9 @@ final class TransportEngine {
     }
 
     /// Starts the clock rolling (no clips) and returns the beat-zero anchor.
+    /// `internal` so `ClipLauncher` can start the transport for a launch.
     @discardableResult
-    private func startRolling() -> UInt64 {
+    func startRolling() -> UInt64 {
         ensureEngineRunning()
         activeCountInBeats = 0
         let anchor = HostClock.now + HostClock.ticks(forSeconds: 0.1)
@@ -632,412 +750,33 @@ final class TransportEngine {
 
     // MARK: - Clip launching
 
-    func launch(clip: Clip, on track: Track) {
-        if recordingSlot != nil { return }
-        selectTrack(track)
-        if mode == .stopped {
-            let anchor = startRolling()
-            scheduleLaunch(clip: clip, on: track, boundary: 0, hostTime: anchor)
-        } else {
-            let boundary = nextQuantizedBeat()
-            scheduleLaunch(clip: clip, on: track, boundary: boundary,
-                           hostTime: hostTime(forBeat: boundary))
-        }
-    }
-
-    func stopClip(on track: Track) {
-        selectTrack(track)
-        guard mode != .stopped,
-              let state = playback[track.id],
-              state.playingClipID != nil || state.queuedClipID != nil else { return }
-        scheduleStop(on: track, boundary: nextQuantizedBeat())
-    }
-
-    func launchScene(_ scene: Int) {
-        selectScene(scene)
-        if recordingSlot != nil { return }
-        let clips = tracks.map { $0.slots[scene] }
-        guard clips.contains(where: { $0 != nil }) || mode != .stopped else { return }
-
-        let boundary: Double
-        let host: UInt64
-        if mode == .stopped {
-            host = startRolling()
-            boundary = 0
-        } else {
-            boundary = nextQuantizedBeat()
-            host = hostTime(forBeat: boundary)
-        }
-
-        for (track, clip) in zip(tracks, clips) {
-            if let clip {
-                scheduleLaunch(clip: clip, on: track, boundary: boundary, hostTime: host)
-            } else if let state = playback[track.id],
-                      state.playingClipID != nil || state.queuedClipID != nil {
-                scheduleStop(on: track, boundary: boundary)
-            }
-        }
-    }
-
-    func stopAllClips() {
-        guard mode != .stopped else { return }
-        let boundary = nextQuantizedBeat()
-        for track in tracks {
-            if let state = playback[track.id],
-               state.playingClipID != nil || state.queuedClipID != nil {
-                scheduleStop(on: track, boundary: boundary)
-            }
-        }
-    }
-
-    private func scheduleLaunch(clip: Clip, on track: Track, boundary: Double, hostTime: UInt64) {
-        guard let channel = graph.channel(for: track.id) else { return }
-
-        let idleIndex = 1 - channel.activeIndex
-        let player = channel.players[idleIndex]
-        player.stop()
-        player.scheduleBuffer(clip.buffer, at: nil, options: [.loops])
-        player.play(at: AVAudioTime(hostTime: hostTime))
-
-        var state = playback[track.id] ?? TrackPlayback()
-        state.queuedClipID = clip.id
-        state.stopQueued = false
-        playback[track.id] = state
-
-        let trackID = track.id
-        let clipID = clip.id
-        channel.pendingTask?.cancel()
-        channel.pendingTask = Task { [weak self] in
-            await self?.sleep(untilBeat: boundary)
-            guard let self, !Task.isCancelled else { return }
-            channel.players[channel.activeIndex].stop()
-            channel.activeIndex = idleIndex
-            var state = self.playback[trackID] ?? TrackPlayback()
-            state.playingClipID = clipID
-            state.playingStartBeat = boundary
-            state.queuedClipID = nil
-            self.playback[trackID] = state
-        }
-    }
-
-    private func scheduleStop(on track: Track, boundary: Double) {
-        guard let channel = graph.channel(for: track.id) else { return }
-        var state = playback[track.id] ?? TrackPlayback()
-        state.stopQueued = true
-        state.queuedClipID = nil
-        playback[track.id] = state
-
-        let trackID = track.id
-        channel.pendingTask?.cancel()
-        channel.pendingTask = Task { [weak self] in
-            await self?.sleep(untilBeat: boundary)
-            guard let self, !Task.isCancelled else { return }
-            channel.stopAllPlayers()
-            self.playback[trackID] = TrackPlayback()
-        }
-    }
-
-    /// Starts a clip immediately but phase-aligned as though it had launched
-    /// at `loopStartBeat`: the first pass plays from the current in-loop
-    /// offset, then the full buffer loops.
-    private func launchInProgress(clip: Clip, on track: Track, loopStartBeat: Double) {
-        guard let channel = graph.channel(for: track.id) else { return }
-        let loopBeats = Double(clip.loopBars * beatsPerBar)
-        guard loopBeats > 0 else { return }
-        let framesPerBeat = 60.0 / tempo * standardFormat.sampleRate
-        let startDelay = 0.06
-        let beatsAtStart = currentBeats + startDelay * tempo / 60
-        var offsetBeats = (beatsAtStart - loopStartBeat).truncatingRemainder(dividingBy: loopBeats)
-        if offsetBeats < 0 { offsetBeats += loopBeats }
-        let clipFrames = Int(clip.buffer.frameLength)
-        let offsetFrames = min(clipFrames, Int((offsetBeats * framesPerBeat).rounded()))
-
-        let idleIndex = 1 - channel.activeIndex
-        let player = channel.players[idleIndex]
-        player.stop()
-        if offsetFrames > 0, offsetFrames < clipFrames,
-           let tail = AudioUtil.slice(clip.buffer, from: offsetFrames, frames: clipFrames - offsetFrames) {
-            player.scheduleBuffer(tail, at: nil)
-        }
-        player.scheduleBuffer(clip.buffer, at: nil, options: [.loops])
-        player.play(at: AVAudioTime(hostTime: HostClock.now + HostClock.ticks(forSeconds: startDelay)))
-
-        channel.pendingTask?.cancel()
-        channel.players[channel.activeIndex].stop()
-        channel.activeIndex = idleIndex
-        playback[track.id] = TrackPlayback(playingClipID: clip.id,
-                                           playingStartBeat: loopStartBeat,
-                                           queuedClipID: nil, stopQueued: false)
-    }
+    // Implementations live in `ClipLauncher`; these thin forwarders keep the
+    // engine's public API (and every UI call site) unchanged.
+    func launch(clip: Clip, on track: Track) { launcher.launch(clip: clip, on: track) }
+    func stopClip(on track: Track) { launcher.stopClip(on: track) }
+    func launchScene(_ scene: Int) { launcher.launchScene(scene) }
+    func stopAllClips() { launcher.stopAllClips() }
 
     // MARK: - Recording
 
-    /// Recording is only possible when the currently selected track is armed.
-    var canRecord: Bool {
-        recordingSlot == nil && (selectedTrack?.isArmed ?? false)
-    }
-
-    /// R key / record button: record into the selected track. Only available
-    /// when the selected track is armed. Targets the selected cell on that
-    /// track, or its first empty slot if no cell on it is selected.
-    func record() {
-        guard recordingSlot == nil else { return }
-        guard let track = selectedTrack, track.isArmed else {
-            statusMessage = "Arm the selected track (● in its header) to record."
-            return
-        }
-        let scene: Int
-        if let slot = selectedSlot, slot.trackID == track.id, slot.scene < track.slots.count {
-            scene = slot.scene
-        } else if let firstEmpty = track.slots.firstIndex(where: { $0 == nil }) {
-            scene = firstEmpty
-        } else {
-            statusMessage = "No empty slot on \(track.name) — select a clip to overwrite or overdub."
-            return
-        }
-        recordIntoSlot(track, scene: scene)
-    }
-
-    /// Records into a cell. Empty → new clip. Occupied → overdub (layer) or
-    /// replace, per the track's `isOverdub` setting.
-    func recordIntoSlot(_ track: Track, scene: Int) {
-        selectTrack(track)
-        selectedSlot = SlotRef(trackID: track.id, scene: scene)
-        guard track.isArmed else {
-            statusMessage = "Arm the track first (● in its header)."
-            return
-        }
-        guard recordingSlot == nil else { return }
-
-        let existing = track.slots[scene]
-        if let existing, track.isOverdub {
-            overdubSource = existing
-            recordBarsOverride = existing.loopBars
-        } else {
-            overdubSource = nil
-            recordBarsOverride = nil
-            // Replacing an occupied slot: silence the outgoing clip now, and
-            // clear it from the slot when recording actually begins.
-            if existing != nil {
-                stopTrackPlayback(track)
-                replaceClearPending = true
-            }
-        }
-
-        if mode == .stopped {
-            Task { await startRecordingFromStopped(track, scene: scene) }
-        } else {
-            startRecordingWhileRolling(track, scene: scene)
-        }
-    }
-
-    private func stopTrackPlayback(_ track: Track) {
-        guard let channel = graph.channel(for: track.id) else { return }
-        channel.pendingTask?.cancel()
-        channel.pendingTask = nil
-        channel.stopAllPlayers()
-        playback[track.id] = TrackPlayback()
-    }
-
-    /// Loops `clip` starting exactly at `host` for overdub monitoring, so the
-    /// performer hears the existing take while recording the new layer.
-    private func startMonitorPlayback(_ clip: Clip, on track: Track, atHost host: UInt64) {
-        guard let channel = graph.channel(for: track.id) else { return }
-        let index = channel.activeIndex
-        let player = channel.players[index]
-        player.stop()
-        player.scheduleBuffer(clip.buffer, at: nil, options: [.loops])
-        player.play(at: AVAudioTime(hostTime: host))
-    }
-
-    /// Clicking the recording cell: finish the take and relaunch it, with the
-    /// transport still rolling — the session-view jam loop.
-    func finishRecordingAndPlay() {
-        guard let slot = recordingSlot else { return }
-        recordAutoStopTask?.cancel()
-        recordAutoStopTask = nil
-        metronome.setClickSuppressed(false)
-        let clip = captureRecordedClip()
-        recordingSlot = nil
-        recordQueuedUntilBeat = nil
-        mode = .playing
-        if let clip, let track = tracks.first(where: { $0.id == slot.trackID }) {
-            launch(clip: clip, on: track)
-        }
-    }
-
-    /// Fixed-length recording reached its end bar: capture the take and keep
-    /// it sounding without a gap, phase-aligned to the boundary it ended on.
-    private func autoFinishRecording(loopStartBeat: Double) {
-        guard let slot = recordingSlot else { return }
-        metronome.setClickSuppressed(false)
-        let clip = captureRecordedClip()
-        recordingSlot = nil
-        recordQueuedUntilBeat = nil
-        mode = .playing
-        guard let clip, let track = tracks.first(where: { $0.id == slot.trackID }) else { return }
-        launchInProgress(clip: clip, on: track, loopStartBeat: loopStartBeat)
-    }
-
-    private func scheduleRecordAutoStop() {
-        recordAutoStopTask?.cancel()
-        recordAutoStopTask = nil
-        // Overdub always runs for the source clip's length; otherwise the
-        // REC BARS setting (nil = free, no auto-stop).
-        guard let bars = recordBarsOverride ?? recordLengthBars else { return }
-        let endBeat = recordStartBeat + Double(bars * beatsPerBar)
-        recordAutoStopTask = Task { [weak self] in
-            guard let self else { return }
-            // Wake just past the boundary so the floor-to-bars trim lands
-            // exactly on `bars`.
-            await self.sleep(untilBeat: endBeat + 0.02 * self.tempo / 60)
-            guard !Task.isCancelled, self.recordingSlot != nil else { return }
-            self.autoFinishRecording(loopStartBeat: endBeat)
-        }
-    }
-
-    private func startRecordingFromStopped(_ track: Track, scene: Int) async {
-        guard mode == .stopped, recordingSlot == nil else { return }
-
-        if !input.isConfigured {
-            let outcome = await input.configure()
-            applyConfigureOutcome(outcome, thenArm: nil)
-            guard input.isConfigured else { return }
-        }
-        ensureEngineRunning()
-        recorder.beginCapture()
-
-        engineError = nil
-        statusMessage = nil
-        recordTempo = tempo
-        recordStartBeat = 0
-        activeCountInBeats = countInBars * beatsPerBar
-
-        let anchor = HostClock.now + HostClock.ticks(forSeconds: 0.1)
-        let countInSeconds = Double(activeCountInBeats) * 60.0 / recordTempo
-        beat0Host = anchor + HostClock.ticks(forSeconds: countInSeconds)
-        metronome.start(countInBeats: activeCountInBeats, atHostTime: anchor)
-        if let source = overdubSource {
-            startMonitorPlayback(source, on: track, atHost: beat0Host)
-        }
-        recordingSlot = SlotRef(trackID: track.id, scene: scene)
-        mode = .recording
-        metronome.setClickSuppressed(true)
-        scheduleRecordAutoStop()
-        scheduleReplaceClear(atBeat: recordStartBeat)
-    }
-
-    private func startRecordingWhileRolling(_ track: Track, scene: Int) {
-        guard input.isConfigured else {
-            statusMessage = "Stop the transport and re-arm the track to set up the input first."
-            return
-        }
-        recorder.beginCapture()
-        statusMessage = nil
-        recordTempo = tempo
-
-        // Punch in at the next bar regardless of the launch quantise setting.
-        let boundary = Double(beatsPerBar) * ((currentBeats + 0.05 * tempo / 60) / Double(beatsPerBar)).rounded(.up)
-        recordStartBeat = boundary
-        beat0Host = hostTime(forBeat: boundary)
-        if let source = overdubSource {
-            startMonitorPlayback(source, on: track, atHost: beat0Host)
-        }
-        recordingSlot = SlotRef(trackID: track.id, scene: scene)
-        recordQueuedUntilBeat = boundary
-        mode = .recording
-        metronome.setClickSuppressed(true)
-        scheduleRecordAutoStop()
-        scheduleReplaceClear(atBeat: boundary)
-
-        Task { [weak self] in
-            await self?.sleep(untilBeat: boundary)
-            guard let self else { return }
-            if self.recordQueuedUntilBeat == boundary { self.recordQueuedUntilBeat = nil }
-        }
-    }
-
-    /// Clears a Replace-mode target clip from its slot the moment recording
-    /// actually starts (after count-in / at punch-in), so it isn't left
-    /// sitting there during the take. Cancelling during count-in keeps it.
-    private func scheduleReplaceClear(atBeat beat: Double) {
-        guard replaceClearPending, let slot = recordingSlot else { return }
-        replaceClearPending = false
-        Task { [weak self] in
-            await self?.sleep(untilBeat: beat)
-            guard let self, self.recordingSlot == slot,
-                  let track = self.tracks.first(where: { $0.id == slot.trackID }),
-                  slot.scene < track.slots.count else { return }
-            track.slots[slot.scene] = nil
-        }
-    }
-
-    /// Trims the capture to whole bars from beat zero and drops it into the
-    /// recording slot. Returns the new clip, or nil if the take was too short.
-    @discardableResult
-    private func captureRecordedClip() -> Clip? {
-        guard let slot = recordingSlot else { return nil }
-        recorder.endCapture()
-
-        let source = overdubSource
-        overdubSource = nil
-        let barsOverride = recordBarsOverride
-        recordBarsOverride = nil
-
-        // Anything captured past the count-in becomes a clip. Overdub and
-        // fixed-length both yield an exact bar count (silence-padded if the
-        // take was cut short); free mode rounds up to whole bars.
-        let beatsRecorded = currentBeats - recordStartBeat
-        let bars: Int
-        if let fixed = barsOverride ?? recordLengthBars {
-            bars = fixed
-        } else {
-            bars = max(1, Int(((beatsRecorded + 0.05) / Double(beatsPerBar)).rounded(.up)))
-        }
-        guard beatsRecorded > 0.05,
-              let format = recorder.captureFormat,
-              let track = tracks.first(where: { $0.id == slot.trackID }) else {
-            recorder.discard()
-            statusMessage = "Recording stopped during the count-in — discarded."
-            return nil
-        }
-
-        let framesPerBeat = 60.0 / recordTempo * format.sampleRate
-        let frameCount = AVAudioFrameCount((Double(bars * beatsPerBar) * framesPerBeat).rounded())
-        guard let captured = recorder.makeLoopBuffer(beat0Host: beat0Host, frameCount: frameCount),
-              let takeBuffer = AudioUtil.convert(captured, to: standardFormat) else {
-            statusMessage = "Recording failed — no audio was captured."
-            return nil
-        }
-
-        // Overdub: sum the new take onto the existing clip (same length).
-        let buffer: AVAudioPCMBuffer
-        let name: String
-        let colorIndex: Int
-        let loopBars: Int
-        if let source, let mixed = AudioUtil.mix(base: source.buffer, overlay: takeBuffer) {
-            buffer = mixed
-            name = source.name
-            colorIndex = source.colorIndex
-            loopBars = source.loopBars
-            statusMessage = "Overdubbed \(source.name)."
-        } else {
-            buffer = takeBuffer
-            name = "\(track.name) \(slot.scene + 1)"
-            colorIndex = track.colorIndex
-            loopBars = bars
-            statusMessage = nil
-        }
-
-        let url = recorder.writeFile(buffer: buffer, name: name)
-        let clip = Clip(name: name, colorIndex: colorIndex, buffer: buffer,
-                        loopBars: loopBars, fileURL: url)
-        track.slots[slot.scene] = clip
-        markDirty()
-        return clip
-    }
+    // Implementations live in `RecordingController`; these thin forwarders keep
+    // the engine's public API (and every UI call site) unchanged.
+    var canRecord: Bool { recording.canRecord }
+    func record() { recording.record() }
+    func recordIntoSlot(_ track: Track, scene: Int) { recording.recordIntoSlot(track, scene: scene) }
+    func finishRecordingAndPlay() { recording.finishRecordingAndPlay() }
 
     // MARK: - Clip management
+
+    /// Rename a clip (undoable).
+    func renameClip(_ clip: Clip, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != clip.name else { return }
+        let previous = clip.name
+        clip.name = trimmed
+        markDirty()
+        registerUndo("Rename Clip") { $0.renameClip(clip, to: previous) }
+    }
 
     /// Recolour a clip — routed through the engine so it marks the project
     /// dirty and registers undo, rather than the view mutating the model.
@@ -1205,13 +944,13 @@ final class TransportEngine {
                         masterVolume: Double, newTracks: [Track]) {
         stop()
         suppressDirty = true
-        defer { suppressDirty = false; hasUnsavedChanges = false }
+        defer { suppressDirty = false; undoManager.removeAllActions(); hasUnsavedChanges = false }
         for track in tracks { deleteTrack(track) }
         self.tempo = tempo
         self.beatsPerBar = beatsPerBar
         self.countInBars = countInBars
         self.quantize = quantize
-        self.sceneCount = sceneCount
+        self.scenes = (0..<max(0, sceneCount)).map { _ in SessionScene() }
         self.masterVolume = masterVolume
         for track in newTracks {
             graph.addChannel(for: track.id)
@@ -1238,20 +977,15 @@ final class TransportEngine {
 
     /// Next launch boundary in beats, always slightly in the future so the
     /// player start remains schedulable.
-    private func nextQuantizedBeat() -> Double {
-        let lead = 0.05 * tempo / 60
-        let beats = max(0, currentBeats) + lead
-        switch quantize {
-        case .none: return beats
-        case .beat: return beats.rounded(.up)
-        case .bar: return Double(beatsPerBar) * (beats / Double(beatsPerBar)).rounded(.up)
-        }
+    func nextQuantizedBeat() -> Double {
+        BeatMath.quantizedBoundary(afterBeats: currentBeats, tempo: tempo,
+                                   beatsPerBar: beatsPerBar, quantize: quantize)
     }
 
     /// Approximate host time of a future beat, assuming the tempo holds
     /// between now and then (tempo changes mid-wait shift queued launches
     /// slightly; the next launch resyncs).
-    private func hostTime(forBeat beat: Double) -> UInt64 {
+    func hostTime(forBeat beat: Double) -> UInt64 {
         let seconds = max(0.02, (beat - currentBeats) * 60.0 / tempo)
         return HostClock.now + HostClock.ticks(forSeconds: seconds)
     }
@@ -1260,7 +994,7 @@ final class TransportEngine {
     /// clock starts on a future anchor, so a single duration computed up
     /// front wakes early — this loops against the authoritative clock (and
     /// self-corrects across tempo changes).
-    private func sleep(untilBeat beat: Double) async {
+    func sleep(untilBeat beat: Double) async {
         while !Task.isCancelled, currentBeats < beat {
             if mode == .stopped { return }
             let seconds = max(0.002, (beat - currentBeats) * 60.0 / tempo)
@@ -1286,7 +1020,7 @@ final class TransportEngine {
         engineError = graph.start()
     }
 
-    private func ensureEngineRunning() {
+    func ensureEngineRunning() {
         graph.ensureRunning()
     }
 }

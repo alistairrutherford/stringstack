@@ -83,6 +83,19 @@ final class EffectInstance: Identifiable {
     }
 }
 
+/// A scene: a row in the session grid. Carries only identity — clips live
+/// positionally in each `Track.slots` array, keyed by the scene's row index —
+/// so its sole job is to give SwiftUI a stable id per row. That identity is
+/// what keeps `ForEach` diffing safe as rows are inserted, moved, and deleted
+/// (an integer `0..<count` range with `id: \.self` is the anti-pattern that
+/// once caused an index-out-of-range crash on scene delete).
+///
+/// Named `SessionScene` rather than `Scene` to avoid colliding with SwiftUI's
+/// `Scene` protocol (the app's `body: some Scene`).
+struct SessionScene: Identifiable {
+    let id = UUID()
+}
+
 /// Addresses one cell in the session grid.
 struct SlotRef: Hashable {
     let trackID: UUID
