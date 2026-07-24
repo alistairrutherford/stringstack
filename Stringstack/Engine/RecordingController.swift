@@ -281,8 +281,11 @@ final class RecordingController {
         }
 
         let url = engine.recorder.writeFile(buffer: buffer, name: name)
+        // The take (and any overdub layered onto it) spans `loopBars` bars at
+        // the tempo it was recorded at — that's the clip's native tempo.
         let clip = Clip(name: name, colorIndex: colorIndex, buffer: buffer,
-                        loopBars: loopBars, fileURL: url)
+                        loopBars: loopBars, fileURL: url, nativeTempo: recordTempo)
+        clip.applyTempo(engine.tempo)
         track.slots[slot.scene] = clip
         engine.markDirty()
         return clip

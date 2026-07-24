@@ -30,6 +30,9 @@ enum ProjectStore {
         var colorIndex: Int
         var loopBars: Int
         var audioFile: String
+        /// Tempo the stored (source) audio was captured at. Optional so older
+        /// projects still decode — they fall back to the project tempo.
+        var nativeTempo: Double?
     }
 
     /// Legacy (arrangement view removed) — kept so old files still decode.
@@ -135,11 +138,14 @@ enum ProjectStore {
         var clipDatas: [ClipData] = []
         for clip in engine.allClips() {
             let filename = "\(clip.id.uuidString).caf"
+            // Persist the un-warped source so the clip re-warps from the same
+            // audio to whatever tempo the project opens at.
             let file = try AVAudioFile(forWriting: audioDirectory.appendingPathComponent(filename),
-                                       settings: clip.buffer.format.settings)
-            try file.write(from: clip.buffer)
+                                       settings: clip.sourceBuffer.format.settings)
+            try file.write(from: clip.sourceBuffer)
             clipDatas.append(ClipData(id: clip.id, name: clip.name, colorIndex: clip.colorIndex,
-                                      loopBars: clip.loopBars, audioFile: filename))
+                                      loopBars: clip.loopBars, audioFile: filename,
+                                      nativeTempo: clip.nativeTempo))
         }
 
         let trackDatas = engine.tracks.map { track in
@@ -227,9 +233,13 @@ enum ProjectStore {
                                              frameCapacity: AVAudioFrameCount(file.length)) else { continue }
             try file.read(into: raw)
             guard let buffer = AudioUtil.convert(raw, to: engine.standardFormat) else { continue }
-            clipsByID[clipData.id] = Clip(id: clipData.id, name: clipData.name,
-                                          colorIndex: clipData.colorIndex, buffer: buffer,
-                                          loopBars: clipData.loopBars, fileURL: audioURL)
+            let clip = Clip(id: clipData.id, name: clipData.name,
+                            colorIndex: clipData.colorIndex, buffer: buffer,
+                            loopBars: clipData.loopBars, fileURL: audioURL,
+                            nativeTempo: clipData.nativeTempo ?? project.tempo)
+            // Warp the source to the tempo the project is opening at.
+            clip.applyTempo(project.tempo)
+            clipsByID[clipData.id] = clip
         }
 
         var newTracks: [Track] = []

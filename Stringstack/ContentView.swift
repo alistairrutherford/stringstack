@@ -39,6 +39,7 @@ struct ContentView: View {
         .onDeleteKey(isEnabled: { engine.selectedSlot != nil }) {
             engine.deleteSelectedClip()
         }
+        .onSessionLaunchKeys(engine)
     }
 
     /// Fixed-height status strip: errors in coral, transient messages in
@@ -52,7 +53,7 @@ struct ContentView: View {
                 Circle().fill(Theme.amber).frame(width: 6, height: 6)
                 Text(status).foregroundStyle(Theme.amber)
             } else {
-                Text("Stringstack 1.0 — space play · R record · ⌘Z undo · ⌘S save")
+                Text("Stringstack 1.0 — space play · R record · 1–9 scenes · A–L clips · ⌘S save")
                     .foregroundStyle(Theme.dimmed)
             }
             Spacer(minLength: 0)

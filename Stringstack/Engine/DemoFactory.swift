@@ -30,7 +30,8 @@ enum DemoFactory {
                                       tempo: tempo, format: format, voice: spec.voice) else { continue }
             let track = engine.tracks[spec.track]
             let clip = Clip(name: spec.name, colorIndex: track.colorIndex,
-                            buffer: buffer, loopBars: spec.bars, fileURL: nil)
+                            buffer: buffer, loopBars: spec.bars, fileURL: nil,
+                            nativeTempo: tempo)
             track.slots[0] = clip
         }
 

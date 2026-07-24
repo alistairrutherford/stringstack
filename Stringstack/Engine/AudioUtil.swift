@@ -52,6 +52,47 @@ enum AudioUtil {
         return out
     }
 
+    /// Linearly resamples `buffer` to exactly `targetFrames` frames, keeping the
+    /// same format. Used for clip warping: playing a loop's audio into a
+    /// different frame count changes its speed (and pitch — this is the simple,
+    /// no-time-stretch version) so it spans the same bars at a new tempo.
+    static func resample(_ buffer: AVAudioPCMBuffer, toFrames targetFrames: Int) -> AVAudioPCMBuffer? {
+        guard targetFrames > 0,
+              let source = buffer.floatChannelData,
+              let output = AVAudioPCMBuffer(pcmFormat: buffer.format,
+                                            frameCapacity: AVAudioFrameCount(targetFrames)),
+              let destination = output.floatChannelData else { return nil }
+        output.frameLength = AVAudioFrameCount(targetFrames)
+        let channels = Int(buffer.format.channelCount)
+        let sourceFrames = Int(buffer.frameLength)
+
+        // Degenerate sources: nothing to interpolate between.
+        guard sourceFrames > 1 else {
+            for channel in 0..<channels {
+                let value = sourceFrames == 1 ? source[channel][0] : 0
+                for frame in 0..<targetFrames { destination[channel][frame] = value }
+            }
+            return output
+        }
+
+        // Map each output frame back to a fractional source position and lerp.
+        // The buffer is treated as periodic (these clips loop), so the sample
+        // after the last wraps to the first — the loop seam stays continuous.
+        let step = Double(sourceFrames) / Double(targetFrames)
+        for channel in 0..<channels {
+            let src = source[channel]
+            let dst = destination[channel]
+            for frame in 0..<targetFrames {
+                let position = Double(frame) * step
+                let index = Int(position) % sourceFrames
+                let next = (index + 1) % sourceFrames
+                let fraction = Float(position - Double(Int(position)))
+                dst[frame] = src[index] + fraction * (src[next] - src[index])
+            }
+        }
+        return output
+    }
+
     /// Copies `frames` frames starting at `start` into a new buffer.
     static func slice(_ buffer: AVAudioPCMBuffer, from start: Int, frames: Int) -> AVAudioPCMBuffer? {
         guard frames > 0, start >= 0, start + frames <= Int(buffer.frameLength),

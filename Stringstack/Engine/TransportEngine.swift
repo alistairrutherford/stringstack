@@ -84,9 +84,25 @@ final class TransportEngine {
     var tempo: Double = 120 {
         didSet {
             let clamped = min(max(tempo.rounded(), 20), 300)
-            if clamped != tempo { tempo = clamped }
+            if clamped != tempo { tempo = clamped; return }
+            guard tempo != oldValue else { return }
             metronome.setTempo(tempo)
+            warpClipsToCurrentTempo()
             markDirty()
+        }
+    }
+
+    /// Re-warps every clip so its loop spans the right number of bars at the new
+    /// tempo, and reschedules any playing loop with its freshly-warped buffer so
+    /// it stays locked to the grid instead of drifting.
+    private func warpClipsToCurrentTempo() {
+        for clip in allClips() { clip.applyTempo(tempo) }
+        guard mode != .stopped else { return }
+        for track in tracks {
+            guard let state = playback[track.id], let clipID = state.playingClipID,
+                  let clip = track.slots.compactMap({ $0 }).first(where: { $0.id == clipID })
+            else { continue }
+            launcher.launchInProgress(clip: clip, on: track, loopStartBeat: state.playingStartBeat)
         }
     }
 
@@ -585,7 +601,7 @@ final class TransportEngine {
                 let effect = EffectInstance(name: name, manufacturer: manufacturer,
                                             componentDescription: description, node: unit)
                 track.effects.append(effect)
-                graph.rebuildChain(for: track.id, effects: track.effects)
+                await graph.rebuildChainFaded(for: track.id, effects: track.effects)
                 markDirty()
                 statusMessage = nil
             } catch {
@@ -597,9 +613,13 @@ final class TransportEngine {
     func removeEffect(_ effect: EffectInstance, from track: Track) {
         PluginWindows.close(effect.id)
         track.effects.removeAll { $0.id == effect.id }
-        graph.rebuildChain(for: track.id, effects: track.effects)
-        graph.detachEffect(effect.node)
         markDirty()
+        // Fade the rebuild, then detach the now-orphaned node once it's out of
+        // the chain.
+        Task {
+            await graph.rebuildChainFaded(for: track.id, effects: track.effects)
+            graph.detachEffect(effect.node)
+        }
     }
 
     /// Moves an effect one step left (-1) or right (+1) in the chain.
@@ -608,8 +628,8 @@ final class TransportEngine {
         let target = index + offset
         guard target >= 0, target < track.effects.count else { return }
         track.effects.swapAt(index, target)
-        graph.rebuildChain(for: track.id, effects: track.effects)
         markDirty()
+        Task { await graph.rebuildChainFaded(for: track.id, effects: track.effects) }
     }
 
     /// Re-instantiates a saved effect and applies its archived state.
@@ -757,6 +777,48 @@ final class TransportEngine {
     func launchScene(_ scene: Int) { launcher.launchScene(scene) }
     func stopAllClips() { launcher.stopAllClips() }
 
+    // MARK: - Performance keys
+
+    /// Push-style keyboard launching. The number row (`1`–`9`, `0`) launches
+    /// scenes 1–10; the home row (`A S D F G H J K L`) launches the *selected*
+    /// scene's clip on tracks 1–9, stopping the track if that cell is empty;
+    /// backtick (`` ` ``) stops every clip. Returns whether the key was a launch
+    /// action (so the caller can swallow it), leaving anything else untouched.
+    @discardableResult
+    func performLaunchKey(_ character: Character) -> Bool {
+        switch character {
+        case "1"..."9":
+            let scene = character.wholeNumberValue! - 1
+            guard scene < sceneCount else { return false }
+            launchScene(scene)
+            return true
+        case "0":
+            guard sceneCount >= 10 else { return false }
+            launchScene(9)
+            return true
+        case "`":
+            stopAllClips()
+            return true
+        default:
+            let homeRow = Array("asdfghjkl")
+            guard let column = homeRow.firstIndex(of: Character(character.lowercased())) else { return false }
+            return launchClipByKey(track: column)
+        }
+    }
+
+    /// Launches (or stops) the clip in the selected scene on the given track
+    /// column. Returns false when there's no such track or no selected scene.
+    private func launchClipByKey(track column: Int) -> Bool {
+        guard column < tracks.count, let scene = selectedScene, scene < sceneCount else { return false }
+        let track = tracks[column]
+        if let clip = track.slots[scene] {
+            launch(clip: clip, on: track)
+        } else {
+            stopClip(on: track)
+        }
+        return true
+    }
+
     // MARK: - Recording
 
     // Implementations live in `RecordingController`; these thin forwarders keep
@@ -834,10 +896,13 @@ final class TransportEngine {
         }
     }
 
-    /// A fresh copy sharing the (immutable) audio buffer, with a new id.
+    /// A fresh copy sharing the (immutable) source audio, warped to the current
+    /// tempo, with a new id.
     private func duplicate(of clip: Clip) -> Clip {
-        Clip(name: clip.name, colorIndex: clip.colorIndex, buffer: clip.buffer,
-             loopBars: clip.loopBars, fileURL: clip.fileURL)
+        let copy = Clip(name: clip.name, colorIndex: clip.colorIndex, buffer: clip.sourceBuffer,
+                        loopBars: clip.loopBars, fileURL: clip.fileURL, nativeTempo: clip.nativeTempo)
+        copy.applyTempo(tempo)
+        return copy
     }
 
     /// DEL key / Track menu: delete the last-clicked clip.
@@ -918,8 +983,15 @@ final class TransportEngine {
             let beats = seconds * tempo / 60
             let bars = max(1, Int((beats / Double(beatsPerBar)).rounded()))
             statusMessage = nil
-            return Clip(name: url.deletingPathExtension().lastPathComponent,
-                        colorIndex: colorIndex, buffer: buffer, loopBars: bars, fileURL: url)
+            // Treat the file as exactly `bars` bars: its native tempo is the one
+            // at which that's true, so warping to the project tempo snaps it to
+            // the grid (rather than looping at a slightly-off length).
+            let nativeTempo = seconds > 0 ? Double(bars * beatsPerBar) * 60.0 / seconds : tempo
+            let clip = Clip(name: url.deletingPathExtension().lastPathComponent,
+                            colorIndex: colorIndex, buffer: buffer, loopBars: bars,
+                            fileURL: url, nativeTempo: nativeTempo)
+            clip.applyTempo(tempo)
+            return clip
         } catch {
             statusMessage = "Couldn't import \(url.lastPathComponent): \(error.localizedDescription)"
             return nil

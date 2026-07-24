@@ -128,4 +128,31 @@ final class AudioGraph {
         }
         engine.connect(current, to: channel.mixer, format: standardFormat)
     }
+
+    /// Same rebuild, but bracketed by a short output fade so a live
+    /// insert/reorder/remove doesn't click: reconnecting nodes in a running
+    /// graph produces a waveform discontinuity, so we ramp the channel's fader
+    /// to silence, rewire, then ramp back to where it was. Inaudible (and
+    /// harmless) when the channel is already silent, e.g. during project load.
+    func rebuildChainFaded(for id: UUID, effects: [EffectInstance]) async {
+        guard let channel = channels[id] else { return }
+        let restore = channel.mixer.outputVolume
+        await rampVolume(channel.mixer, from: restore, to: 0, milliseconds: 10)
+        rebuildChain(for: id, effects: effects)
+        await rampVolume(channel.mixer, from: 0, to: restore, milliseconds: 10)
+    }
+
+    /// Steps a mixer's output volume from `from` to `to` over `milliseconds`,
+    /// short enough to read as a de-click bracket rather than an audible dip.
+    private func rampVolume(_ mixer: AVAudioMixerNode, from: Float, to: Float,
+                            milliseconds: Int) async {
+        let steps = 8
+        let perStep = UInt64(milliseconds) * 1_000_000 / UInt64(steps)
+        for step in 1...steps {
+            let progress = Float(step) / Float(steps)
+            mixer.outputVolume = from + (to - from) * progress
+            try? await Task.sleep(nanoseconds: perStep)
+        }
+        mixer.outputVolume = to
+    }
 }

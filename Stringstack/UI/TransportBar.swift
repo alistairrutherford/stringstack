@@ -173,7 +173,13 @@ struct TransportBar: View {
 
             tempoStepButton("plus") { engine.tempo += 1 }
         }
-        .help("Type a BPM, use −/+, or drag the number up/down")
+        // Tempo is locked while recording — changing it mid-take would desync
+        // the capture from the clock it's being trimmed against.
+        .disabled(engine.mode == .recording)
+        .opacity(engine.mode == .recording ? 0.4 : 1)
+        .help(engine.mode == .recording
+              ? "Tempo is locked while recording"
+              : "Type a BPM, use −/+, or drag the number up/down")
     }
 
     private func tempoStepButton(_ symbol: String, action: @escaping () -> Void) -> some View {

@@ -15,6 +15,14 @@ extension View {
         modifier(DeleteKeyMonitor(isEnabled: isEnabled, action: action))
     }
 
+    /// Push-style performance launching from the computer keyboard (see
+    /// `TransportEngine.performLaunchKey`). Unmodified keys only, and never
+    /// while a text field is being edited — so ⌘-shortcuts and typing (track
+    /// rename, effect search, tempo entry) are untouched.
+    func onSessionLaunchKeys(_ engine: TransportEngine) -> some View {
+        modifier(LaunchKeyMonitor(engine: engine))
+    }
+
     /// Drops keyboard focus from an editing text field when the view is
     /// tapped — but only while a field is actually being edited, so it
     /// doesn't churn the responder chain on every click.
@@ -26,6 +34,33 @@ extension View {
                 window.makeFirstResponder(nil)
             }
         })
+    }
+}
+
+private struct LaunchKeyMonitor: ViewModifier {
+    let engine: TransportEngine
+    @State private var monitor: Any?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                guard monitor == nil else { return }
+                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                    // Leave modifier chords and text editing alone; only plain
+                    // keys perform launches.
+                    let modified = !event.modifierFlags
+                        .intersection([.command, .option, .control]).isEmpty
+                    let editingText = NSApp.keyWindow?.firstResponder is NSTextView
+                    guard !modified, !editingText,
+                          let character = event.charactersIgnoringModifiers?.first,
+                          engine.performLaunchKey(character) else { return event }
+                    return nil
+                }
+            }
+            .onDisappear {
+                if let monitor { NSEvent.removeMonitor(monitor) }
+                monitor = nil
+            }
     }
 }
 

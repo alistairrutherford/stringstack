@@ -32,6 +32,12 @@ final class Track: Identifiable {
 /// An audio loop living in a session grid slot. Buffers are normalised to
 /// the engine's standard format at creation so any clip can play on any
 /// track player.
+///
+/// A clip owns its immutable `sourceBuffer` — `loopBars` bars of audio at its
+/// `nativeTempo` — plus a derived `buffer` used for playback. When the project
+/// tempo differs from `nativeTempo` the source is resampled (warped) so the
+/// loop still spans exactly `loopBars` bars at the current tempo instead of
+/// drifting. This is the simple, pitch-shifting version of tempo-follow.
 @MainActor
 @Observable
 final class Clip: Identifiable {
@@ -39,7 +45,13 @@ final class Clip: Identifiable {
     var name: String
     /// Index into `Theme.trackPalette` — the model stays UI-free.
     var colorIndex: Int
-    let buffer: AVAudioPCMBuffer
+    /// The original, un-warped audio: `loopBars` bars at `nativeTempo`.
+    let sourceBuffer: AVAudioPCMBuffer
+    /// Tempo (BPM) at which `sourceBuffer` spans exactly `loopBars` bars.
+    let nativeTempo: Double
+    /// The buffer players actually schedule — `sourceBuffer`, or a warped copy
+    /// when the project tempo differs from `nativeTempo`.
+    private(set) var buffer: AVAudioPCMBuffer
     let loopBars: Int
     let fileURL: URL?
     /// Low-res peaks for grid cells and placements.
@@ -48,15 +60,30 @@ final class Clip: Identifiable {
     let detailWaveform: [Float]
 
     init(id: UUID = UUID(), name: String, colorIndex: Int, buffer: AVAudioPCMBuffer,
-         loopBars: Int, fileURL: URL?) {
+         loopBars: Int, fileURL: URL?, nativeTempo: Double) {
         self.id = id
         self.name = name
         self.colorIndex = colorIndex
+        self.sourceBuffer = buffer
         self.buffer = buffer
+        self.nativeTempo = nativeTempo
         self.loopBars = loopBars
         self.fileURL = fileURL
+        // Peaks come from the source so the drawn shape is tempo-independent.
         self.waveform = Waveform.peaks(for: buffer, bins: 96)
         self.detailWaveform = Waveform.peaks(for: buffer, bins: 480)
+    }
+
+    /// Warps `buffer` so the loop spans `loopBars` bars at `tempo`. Frame count
+    /// scales by `nativeTempo / tempo`; at (near) the native tempo the source is
+    /// reused untouched.
+    func applyTempo(_ tempo: Double) {
+        guard tempo > 0, abs(tempo - nativeTempo) > 0.01 else {
+            buffer = sourceBuffer
+            return
+        }
+        let targetFrames = Int((Double(sourceBuffer.frameLength) * nativeTempo / tempo).rounded())
+        buffer = AudioUtil.resample(sourceBuffer, toFrames: targetFrames) ?? sourceBuffer
     }
 }
 
