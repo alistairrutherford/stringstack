@@ -15,6 +15,12 @@ final class RecordingService: @unchecked Sendable {
     private var chunks: [(buffer: AVAudioPCMBuffer, hostTime: UInt64)] = []
     private let peakBits = Atomic<UInt64>(0.0.bitPattern)
     private let capturingFlag = Atomic<Bool>(false)
+    /// Input gain applied to captured audio and reflected in the meter.
+    private let gainBits = Atomic<UInt64>(1.0.bitPattern)
+
+    func setInputGain(_ gain: Double) {
+        gainBits.store(max(0, gain).bitPattern, ordering: .relaxed)
+    }
 
     private(set) var captureFormat: AVAudioFormat?
     /// Main-thread bookkeeping so the tap is installed exactly once per
@@ -37,10 +43,11 @@ final class RecordingService: @unchecked Sendable {
         captureFormat = inputNode.outputFormat(forBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, when in
             guard let self else { return }
+            let gain = Float(Double(bitPattern: self.gainBits.load(ordering: .relaxed)))
             self.captureFormat = buffer.format
-            self.updatePeak(from: buffer)
+            self.updatePeak(from: buffer, gain: gain)
             guard self.capturingFlag.load(ordering: .relaxed),
-                  let copy = Self.copyBuffer(buffer) else { return }
+                  let copy = Self.copyBuffer(buffer, gain: gain) else { return }
             self.lock.lock()
             self.chunks.append((copy, when.hostTime))
             self.lock.unlock()
@@ -134,7 +141,7 @@ final class RecordingService: @unchecked Sendable {
 
     // MARK: - Helpers
 
-    private func updatePeak(from buffer: AVAudioPCMBuffer) {
+    private func updatePeak(from buffer: AVAudioPCMBuffer, gain: Float) {
         guard let data = buffer.floatChannelData else { return }
         var peak: Float = 0
         for channel in 0..<Int(buffer.format.channelCount) {
@@ -142,17 +149,23 @@ final class RecordingService: @unchecked Sendable {
             vDSP_maxmgv(data[channel], 1, &channelPeak, vDSP_Length(buffer.frameLength))
             peak = max(peak, channelPeak)
         }
-        let smoothed = max(Double(peak), inputPeak * 0.82)
+        let smoothed = max(Double(peak * gain), inputPeak * 0.82)
         peakBits.store(smoothed.bitPattern, ordering: .relaxed)
     }
 
-    private static func copyBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+    private static func copyBuffer(_ buffer: AVAudioPCMBuffer, gain: Float) -> AVAudioPCMBuffer? {
         guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength),
               let src = buffer.floatChannelData,
               let dst = copy.floatChannelData else { return nil }
         copy.frameLength = buffer.frameLength
+        let count = Int(buffer.frameLength)
         for channel in 0..<Int(buffer.format.channelCount) {
-            dst[channel].update(from: src[channel], count: Int(buffer.frameLength))
+            if gain == 1 {
+                dst[channel].update(from: src[channel], count: count)
+            } else {
+                var scale = gain
+                vDSP_vsmul(src[channel], 1, &scale, dst[channel], 1, vDSP_Length(count))
+            }
         }
         return copy
     }

@@ -5,9 +5,17 @@ struct InputBar: View {
     @Environment(TransportEngine.self) private var engine
 
     var body: some View {
-        HStack(spacing: 14) {
+        @Bindable var engine = engine
+        return HStack(spacing: 14) {
             inputPicker
-            LevelMeter()
+            VStack(spacing: 5) {
+                LevelMeter()
+                Slider(value: $engine.inputGain, in: 0...2)
+                    .controlSize(.mini)
+                    .frame(width: 110)
+                    .tint(Theme.cyan)
+                    .help("Input level — gain applied to recorded audio")
+            }
             divider
             hint
         }

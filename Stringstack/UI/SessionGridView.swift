@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 private enum GridMetrics {
     static let cellWidth: CGFloat = 136
     static let cellHeight: CGFloat = 46
-    static let headerHeight: CGFloat = 108
+    static let headerHeight: CGFloat = 124
     static let sceneNumberWidth: CGFloat = 22
     static let sceneWidth: CGFloat = 44
     static let sceneStopWidth: CGFloat = 30
@@ -263,6 +263,48 @@ private struct SceneStopButton: View {
     }
 }
 
+/// Compact horizontal stereo VU meter for a track header. The meter is
+/// post-fader, so the track's VOL slider controls its level.
+private struct TrackMeter: View {
+    @Environment(TransportEngine.self) private var engine
+    let track: Track
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: nil, paused: engine.mode == .stopped)) { _ in
+            let base = engine.mode == .stopped
+                ? (left: 0.0, right: 0.0)
+                : engine.meterLevels(for: track)
+            // The meter tap is pre-pan, so reflect the knob with a balance
+            // law: centre keeps both channels, turning fully to one side
+            // silences the other.
+            let pan = track.pan
+            let leftGain = pan <= 0 ? 1.0 : max(0, 1 - pan)
+            let rightGain = pan >= 0 ? 1.0 : max(0, 1 + pan)
+            VStack(spacing: 2) {
+                bar(level: base.left * leftGain)
+                bar(level: base.right * rightGain)
+            }
+        }
+        .frame(height: 8)
+        .help("Output level (post-volume, reflects pan)")
+    }
+
+    private func bar(level: Double) -> some View {
+        let fraction = min(1, pow(level, 0.5))
+        return GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Theme.surface)
+                Capsule()
+                    .fill(LinearGradient(colors: [Theme.mint, Theme.amber, Theme.coral],
+                                         startPoint: .leading, endPoint: .trailing))
+                    .frame(width: max(0, proxy.size.width * fraction))
+            }
+            .clipShape(Capsule())
+        }
+        .frame(height: 3)
+    }
+}
+
 // MARK: - Track column
 
 private struct TrackColumn: View {
@@ -347,6 +389,8 @@ private struct TrackHeader: View {
                     set: { engine.setPan(track, $0) }
                 ))
             }
+
+            TrackMeter(track: track)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)

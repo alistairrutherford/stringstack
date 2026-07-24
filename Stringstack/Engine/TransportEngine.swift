@@ -102,6 +102,11 @@ final class TransportEngine {
         didSet { metronome.setVolume(metronomeVolume) }
     }
 
+    /// Input gain applied to recorded audio (and the input meter). 1 = unity.
+    var inputGain = 1.0 {
+        didSet { recorder.setInputGain(inputGain) }
+    }
+
     var masterVolume = 0.9 {
         didSet {
             graph.setMasterVolume(masterVolume)
